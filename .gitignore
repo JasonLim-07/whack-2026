@@ -1,0 +1,12 @@
+# Dependencies and generated Next.js output
+node_modules/
+.next/
+out/
+coverage/
+
+# Local configuration and logs
+.env*
+!.env.example
+*.log
+.DS_Store
+.vercel/
