@@ -1,8 +1,29 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
 
 const originalText = "我有两个书。";
+
+// Unit tests never use local credentials or make external requests.
+beforeEach((t) => {
+  const previousEnvironment = process.env;
+  process.env = { ...process.env, GEMINI_API_KEY: "", GEMINI_MODEL: "" };
+  t.after(() => { process.env = previousEnvironment; });
+  t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("Unexpected network request in unit test.");
+  });
+});
+
+function mockGemini(t, handler) {
+  process.env.GEMINI_API_KEY = "unit-test-key";
+  return t.mock.method(globalThis, "fetch", handler);
+}
+
+function geminiResponse(text) {
+  return Response.json({
+    candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+  });
+}
 
 function correction() {
   return {
@@ -137,4 +158,107 @@ test("valid inputs explicitly reject until the provider is configured", async ()
       /Grammar LLM provider is not configured yet/,
     );
   }
+});
+
+test("Gemini request uses configured model, learner level and the complete response schema", async (t) => {
+  process.env.GEMINI_MODEL = "configured-model";
+  let body;
+  const request = mockGemini(t, async (url, init) => {
+    assert.match(String(url), /models\/configured-model:generateContent/);
+    body = JSON.parse(init.body);
+    return geminiResponse(JSON.stringify(correction()));
+  });
+  assert.deepEqual(await analyseGrammar(originalText, { level: "advanced" }), correction());
+  assert.equal(request.mock.callCount(), 1);
+  assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), { text: originalText, level: "advanced" });
+  assert.match(body.systemInstruction.parts[0].text, /careful Chinese language tutor/);
+  assert.equal(body.generationConfig.responseMimeType, "application/json");
+  const schema = body.generationConfig.responseJsonSchema;
+  assert.deepEqual(schema.required, ["correctedText", "issues"]);
+  assert.deepEqual(schema.properties.issues.items.required, ["id", "type", "original", "replacement", "explanation"]);
+  assert.deepEqual(schema.properties.issues.items.properties.type.enum, ["grammar", "word_choice", "character"]);
+});
+
+test("default model and learner level are used; issue-free output preserves input", async (t) => {
+  process.env.GEMINI_MODEL = "  ";
+  const text = "  我是学生。\n";
+  mockGemini(t, async (url, init) => {
+    assert.match(String(url), /models\/gemini-2\.5-flash:generateContent/);
+    const body = JSON.parse(init.body);
+    assert.equal(JSON.parse(body.contents[0].parts[0].text).level, "beginner");
+    return geminiResponse(JSON.stringify({ correctedText: "我是一名学生。", issues: [] }));
+  });
+  assert.deepEqual(await analyseGrammar(text), { correctedText: text, issues: [] });
+});
+
+test("empty Gemini responses are rejected", async (t) => {
+  for (const text of ["", " \n"]) {
+    mockGemini(t, async () => geminiResponse(text));
+    await assert.rejects(analyseGrammar(originalText), /empty grammar response/);
+  }
+  mockGemini(t, async () => Response.json({ candidates: [] }));
+  await assert.rejects(analyseGrammar(originalText), /empty grammar response/);
+});
+
+test("malformed Gemini JSON is rejected without echoing response contents", async (t) => {
+  mockGemini(t, async () => geminiResponse("private-provider-content {"));
+  await assert.rejects(analyseGrammar(originalText), {
+    message: "Gemini returned malformed JSON for grammar analysis.",
+  });
+});
+
+test("Gemini results pass through the existing response validator", async (t) => {
+  const response = correction();
+  response.issues[0].type = "style";
+  mockGemini(t, async () => geminiResponse(JSON.stringify(response)));
+  await assert.rejects(analyseGrammar(originalText), /Invalid grammar response: issues\[0\].type/);
+});
+
+test("provider status errors are safe and never retried", async (t) => {
+  for (const [status, message] of [
+    [429, /rate limit or quota exceeded \(HTTP 429\)/],
+    [404, /model is unavailable.*HTTP 404/],
+    [401, /authentication or access denied \(HTTP 401\)/],
+    [403, /authentication or access denied \(HTTP 403\)/],
+    [400, /request failed \(HTTP 400\)/],
+    [503, /request failed \(HTTP 503\)/],
+  ]) {
+    const request = mockGemini(t, async () => Response.json({
+      error: { code: status, message: "private-provider-content unit-test-key" },
+    }, { status }));
+    await assert.rejects(analyseGrammar(originalText), (error) => {
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /private-provider-content|unit-test-key/);
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    assert.equal(request.mock.callCount(), 1);
+  }
+});
+
+test("network failures expose only a safe message", async (t) => {
+  const request = mockGemini(t, async () => {
+    throw new Error("unit-test-key private network details");
+  });
+  await assert.rejects(analyseGrammar(originalText), (error) => {
+    assert.match(error.message, /request failed.*network access and request timeout/);
+    assert.doesNotMatch(error.message, /unit-test-key|private/);
+    return true;
+  });
+  assert.equal(request.mock.callCount(), 1);
+});
+
+test("whitespace-only credentials are treated as unconfigured", async () => {
+  process.env.GEMINI_API_KEY = "   ";
+  await assert.rejects(analyseGrammar(originalText), /not configured yet/);
+});
+
+test("importing the live script makes no request and prints nothing", async (t) => {
+  const request = mockGemini(t, async () => { throw new Error("Must not be called"); });
+  const log = t.mock.method(console, "log", () => {});
+  const error = t.mock.method(console, "error", () => {});
+  await import("../../scripts/test-grammar-live.mjs");
+  assert.equal(request.mock.callCount(), 0);
+  assert.equal(log.mock.callCount(), 0);
+  assert.equal(error.mock.callCount(), 0);
 });
