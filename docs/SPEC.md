@@ -157,7 +157,7 @@ Expose an imperative method through a React ref:
 
 The returned `Blob` must have MIME type `image/png`.
 
-PNG export must include all current visible handwriting on a solid white background. It must not include the feedback panel or toolbar.
+PNG export must include all remaining completed handwriting, including offscreen strokes, cropped to its world-space bounds with 24 units of white padding. Export at one pixel per world unit, independent of pan, zoom and display pixel ratio. It must use a solid white background and omit the grid, boundary warnings, feedback panel and toolbar. Include boundary-flagged strokes without filtering. Reject empty writing, exports above 4096 pixels per side, or PNG files above 5 MiB; do not silently downscale. This all-handwriting policy was agreed during fullintegration/mvp integration.
 
 The canvas maintains structured strokes internally, including stroke IDs and ordered points, so that erasing and undo are reliable.
 
