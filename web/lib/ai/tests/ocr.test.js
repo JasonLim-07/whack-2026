@@ -47,7 +47,7 @@ test("Tier 2 (Medium Confidence 0.60 - 0.89): re-ranks visual candidates by gram
   });
 
   assert.equal(res.status, "LOW_CONFIDENCE");
-  assert.equal(res.confidence, 0.86);
+  assert.ok(Math.abs(res.confidence - 0.865) < 1e-12);
   assert.equal(res.requiresVerification, true);
   assert.equal(res.recognizedText, "我有三本");
   assert.equal(res.text, "我有三书");
@@ -162,4 +162,15 @@ test("Boundary thresholds (0.90 is SUCCESS, 0.89 is LOW_CONFIDENCE, 0.60 is LOW_
   });
   assert.equal(at59.status, "UNREADABLE");
   assert.equal(at59.text, "");
+});
+
+test("uniform boundary scores do not drift across tiers when averaged", async () => {
+  const fixture = buildHandwritingFixture("人");
+  for (const [confidence, expected] of [[0.90, "SUCCESS"], [0.60, "LOW_CONFIDENCE"]]) {
+    const result = await recognizeHandwriting(fixture.dataUrl, {
+      mockResult: { characters: Array.from({ length: 30 }, () => ({ character: "人", confidence })) },
+    });
+    assert.equal(result.confidence, confidence);
+    assert.equal(result.status, expected);
+  }
 });

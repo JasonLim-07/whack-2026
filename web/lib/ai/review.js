@@ -14,8 +14,46 @@ class ReviewError extends Error {
   }
 }
 
+async function readBody(request, limit, tooLarge) {
+  if (Number(request.headers.get("content-length")) > limit) throw tooLarge();
+  if (!request.body) throw new Error("Missing body");
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request.body) {
+    size += chunk.byteLength;
+    if (size > limit) throw tooLarge();
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+async function readConfirmedText(request) {
+  let input;
+  try {
+    const bytes = await readBody(request, 64 * 1024, () =>
+      new ReviewError(413, "TEXT_TOO_LARGE", "Confirmed text request must not exceed 64 KiB."));
+    input = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    if (error instanceof ReviewError) throw error;
+    throw new ReviewError(400, "INVALID_REQUEST", "Unable to read confirmed text JSON.");
+  }
+  if (!input || Array.isArray(input) || typeof input !== "object" ||
+      typeof input.text !== "string" || !input.text.trim()) {
+    throw new ReviewError(400, "INVALID_TEXT", "Confirmed text must be a non-empty string.");
+  }
+  const { text, level = "beginner", revision = null } = input;
+  if (typeof level !== "string" || !level.trim()) {
+    throw new ReviewError(400, "INVALID_LEVEL", "Level must be a non-empty string.");
+  }
+  if (Object.hasOwn(input, "revision") && (!Number.isSafeInteger(input.revision) || input.revision < 0)) {
+    throw new ReviewError(400, "INVALID_REVISION", "Revision must be a non-negative safe integer.");
+  }
+  return { text, level, revision };
+}
+
 async function readReviewRequest(request) {
   const contentType = request.headers.get("content-type") || "";
+  if (/^application\/json\s*(?:;|$)/i.test(contentType)) return readConfirmedText(request);
   if (!/^multipart\/form-data\s*;/i.test(contentType)) {
     throw new ReviewError(400, "INVALID_REQUEST", "Expected multipart/form-data with a PNG image.");
   }
@@ -27,15 +65,7 @@ async function readReviewRequest(request) {
 
   let form;
   try {
-    const chunks = [];
-    let size = 0;
-    if (!request.body) throw new Error("Missing body");
-    for await (const chunk of request.body) {
-      size += chunk.byteLength;
-      if (size > MAX_REQUEST_BYTES) throw tooLarge();
-      chunks.push(chunk);
-    }
-    form = await new Response(Buffer.concat(chunks), {
+    form = await new Response(await readBody(request, MAX_REQUEST_BYTES, tooLarge), {
       headers: { "content-type": contentType },
     }).formData();
   } catch (error) {
@@ -92,6 +122,23 @@ function validConfidence(value) {
   return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1);
 }
 
+async function reviewText(text, level, revision, grammar, confidence = null, segments = []) {
+  let analysis;
+  try {
+    analysis = validateGrammarResponse(await grammar(text, { level }), text);
+  } catch (error) {
+    throw providerError(error, "GRAMMAR");
+  }
+  return {
+    recognizedText: text,
+    ocrConfidence: confidence,
+    ocrSegments: segments,
+    correctedText: analysis.correctedText,
+    issues: analysis.issues,
+    revision,
+  };
+}
+
 /** Orchestrate already-validated input; dependencies are injected only by server code. */
 export async function reviewHandwriting(
   { imageBuffer, level = "beginner", revision = null },
@@ -107,6 +154,9 @@ export async function reviewHandwriting(
   } catch (error) {
     throw providerError(error, "OCR");
   }
+  if (recognition?.status === "UNREADABLE") {
+    throw new ReviewError(422, "UNREADABLE_HANDWRITING", "We couldn't read this handwriting clearly. Please try writing it again.");
+  }
   if (!recognition || typeof recognition.text !== "string" || recognition.text.trim() === "") {
     throw new ReviewError(400, "UNREADABLE_TEXT", "No readable handwriting text was recognised.");
   }
@@ -120,27 +170,27 @@ export async function reviewHandwriting(
     return { text: segment.text, confidence: segment.confidence };
   });
 
-  let analysis;
-  try {
-    analysis = validateGrammarResponse(await grammar(recognition.text, { level }), recognition.text);
-  } catch (error) {
-    throw providerError(error, "GRAMMAR");
+  if (recognition.status === "LOW_CONFIDENCE" || recognition.requiresVerification === true) {
+    return {
+      status: "LOW_CONFIDENCE",
+      recognizedText: recognition.text,
+      ocrConfidence: recognition.confidence,
+      ocrSegments: segments,
+      requiresVerification: true,
+      characterCandidates: recognition.characterCandidates,
+      revision,
+    };
   }
-  return {
-    recognizedText: recognition.text,
-    ocrConfidence: recognition.confidence,
-    ocrSegments: segments,
-    correctedText: analysis.correctedText,
-    issues: analysis.issues,
-    revision,
-  };
+  return reviewText(recognition.text, level, revision, grammar, recognition.confidence, segments);
 }
 
 /** Shared request handler; the normal route supplies no mock OCR dependency. */
 export async function handleReview(request, dependencies = {}) {
   try {
     const input = await readReviewRequest(request);
-    const review = await reviewHandwriting(input, dependencies);
+    const review = Object.hasOwn(input, "text")
+      ? await reviewText(input.text, input.level, input.revision, dependencies.analyseGrammar || analyseGrammar)
+      : await reviewHandwriting(input, dependencies);
     return Response.json(review);
   } catch (error) {
     if (error instanceof ReviewError) {

@@ -425,18 +425,21 @@ export function rankVisualCandidatesByContext(
  */
 export function buildThreeTierOcrResponse(normalizedResult) {
   const rawText = String(
-    normalizedResult?.text ?? normalizedResult?.transcription ?? ""
+    normalizedResult?.originalText ?? normalizedResult?.text ?? normalizedResult?.transcription ?? ""
   );
   const chars = Array.isArray(normalizedResult?.characters)
     ? normalizedResult.characters
     : [];
 
-  const rawConf = parseConfidence(normalizedResult?.confidence);
-  const confidence = rawConf !== null ? rawConf : 0.0;
+  const confidence = normalizedResult?.provider === "gemini-vision"
+    ? null : parseConfidence(normalizedResult?.confidence, false);
+  // Keep source metadata for the review adapter; ranked text is only a suggestion.
+  const source = { originalText: rawText, characters: chars, provider: normalizedResult?.provider };
 
   // Tier 3: Low Confidence (< 0.60) or empty/unreadable input -> NO context ranking
-  if (!rawText || confidence < LOW_CONFIDENCE_THRESHOLD) {
+  if (!rawText.trim() || (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD)) {
     return {
+      ...source,
       status: "UNREADABLE",
       text: "",
       recognizedText: "",
@@ -449,6 +452,7 @@ export function buildThreeTierOcrResponse(normalizedResult) {
   // Tier 1: High Confidence (>= 0.90) -> Pass directly without modification (NO context ranking)
   if (confidence >= HIGH_CONFIDENCE_THRESHOLD) {
     return {
+      ...source,
       status: "SUCCESS",
       text: rawText,
       recognizedText: rawText,
@@ -461,14 +465,14 @@ export function buildThreeTierOcrResponse(normalizedResult) {
   // Tier 2: Medium Confidence (0.60 - 0.89) -> Context-Aware Candidate Ranking
   const sentenceChars =
     chars.length > 0
-      ? chars.map((c) => String(c?.character || "").trim())
+      ? chars.map((c) => String(c?.originalCharacter ?? c?.character ?? "").trim())
       : Array.from(rawText);
 
   const topContextualChars = [...sentenceChars];
   const characterCandidates = [];
 
   chars.forEach((charEntry, index) => {
-    const ch = String(charEntry?.character || "").trim();
+    const ch = sentenceChars[index];
     if (!ch || PUNCTUATION_REGEX.test(ch)) {
       return;
     }
@@ -550,6 +554,7 @@ export function buildThreeTierOcrResponse(normalizedResult) {
   const recognizedText = topContextualChars.join("");
 
   return {
+    ...source,
     status: "LOW_CONFIDENCE",
     confidence,
     requiresVerification: true,
@@ -557,6 +562,22 @@ export function buildThreeTierOcrResponse(normalizedResult) {
     text: rawText,
     characterCandidates,
   };
+}
+
+// Normalization rounds display scores. Classify using unrounded evidence and
+// keep unknown/partial confidence distinct from an observed zero. Gemini's
+// generated confidence values are self-ratings, so require confirmation.
+function normalizeForRouting(raw, options) {
+  const result = normalizeOcrResult(raw, options);
+  const scores = (raw.characters || [])
+    .filter((entry) => typeof entry?.character === "string" && entry.character.trim())
+    .map((entry) => parseConfidence(entry.confidence, false));
+  result.confidence = raw.provider === "gemini-vision" ? null : scores.length
+    ? scores.every((score) => score !== null)
+      ? scores.reduce((mean, score, index) => mean + (score - mean) / (index + 1), 0)
+      : null
+    : parseConfidence(raw.overallConfidence, false);
+  return result;
 }
 
 /**
@@ -582,7 +603,7 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
   const strokeClusters = clusterStrokesIntoCharacters(strokes);
 
   if (options.mockResult) {
-    const normalized = normalizeOcrResult(options.mockResult, {
+    const normalized = normalizeForRouting(options.mockResult, {
       strokeClusters,
       canvas,
       language,
@@ -653,7 +674,7 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
     }
   }
 
-  const normalized = normalizeOcrResult(rawModelResult, {
+  const normalized = normalizeForRouting(rawModelResult, {
     strokeClusters,
     canvas,
     language,
