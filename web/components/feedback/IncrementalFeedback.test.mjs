@@ -28,30 +28,30 @@ const render = (props = {}) => renderToStaticMarkup(React.createElement(Componen
 
 test("character uncertainties have separate correction controls and namespaced radio groups", () => {
   const html = render();
-  assert.match(html, /Digital transcription/); assert.match(html, /Character checks/);
+  assert.match(html, /Your writing/); assert.match(html, /Check these characters/);
   assert.match(html, /name="region-0:0:0:0-character-0"/);
-  assert.match(html, /Confirm text and review/); assert.match(html, /Stroke-order checking is not yet available/);
+  assert.match(html, /Confirm text and review/); assert.doesNotMatch(html, /Writing region|Intended text confirmed|Stroke-order checking is not yet available/);
 });
 
 test("grammar is blocked until uncertain text is confirmed and writing hides stale controls", () => {
   const blocked = render({ state: { ...state, sentences: [{ text: "末。", fingerprint: "sentence", status: "blocked" }] } });
-  assert.match(blocked, /Confirm the uncertain handwriting/);
+  assert.match(blocked, /Confirm the characters above/);
   const editing = render({ editing: true });
-  assert.match(editing, /Writing is changing/); assert.doesNotMatch(editing, /type="radio"/);
+  assert.match(editing, /Analysing/); assert.doesNotMatch(editing, /type="radio"/);
 });
 
 test("grammar corrections, dismissal, details and digital acceptance remain separate from handwriting", () => {
   const sentence = { text: "我有三书。", fingerprint: "sentence", status: "ready", accepted: true,
     result: { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", original: "三书", replacement: "三本书", explanation: "Books use 本." }] } };
   const html = render({ state: { ...state, regions: [], sentences: [sentence] } });
-  assert.match(html, /GCSE grammar/); assert.match(html, /Explanation details/);
-  assert.match(html, /Dismiss suggestion/); assert.match(html, /Digital correction:/);
+  assert.match(html, /Grammar feedback/); assert.match(html, /More options/);
+  assert.match(html, /Dismiss suggestion/); assert.match(html, /Digital correction applied/);
   const dismissed = render({ state: { ...state, regions: [], sentences: [sentence], dismissed: ["grammar:sentence:one"] } });
   assert.doesNotMatch(dismissed, /Books use 本/);
 });
 
 test("recognition errors and loading do not claim that handwriting is correct", () => {
-  assert.match(render({ state: { ...state, regions: [{ ...region, status: "loading" }] } }), /Recognising this region/);
+  assert.match(render({ state: { ...state, regions: [{ ...region, status: "loading" }] } }), /Analysing/);
   const failed = render({ state: { ...state, regions: [{ ...region, status: "error", error: "Provider unavailable" }] } });
   assert.match(failed, /Provider unavailable/); assert.match(failed, /Retry character checking/);
   assert.doesNotMatch(failed, /No supported character concerns detected/);
@@ -61,6 +61,35 @@ test("unread squares offer a visible text confirmation and retry instead of unex
   const unread = { ...region, text: "", review: { ...review, recognizedText: "", characterCandidates: [],
     requiresTextConfirmation: true, unresolvedRegions: [], clarificationMessage: "Enter the intended Chinese text or retry." } };
   const html = render({ state: { ...state, regions: [unread], transcription: { text: "\uFFFC" } } });
-  assert.match(html, /\[unread\]/); assert.match(html, /Some writing could not be recognised/);
+  assert.match(html, /□/); assert.match(html, /Check these characters/);
   assert.match(html, /<textarea/); assert.match(html, /Retry recognition/);
+});
+
+test("confirmed regions disappear while unresolved choices stay visible", () => {
+  const confirmed = { ...region, id: "confirmed", fingerprint: "done", confirmed: true };
+  const html = render({ state: { ...state, regions: [confirmed, region] } });
+  assert.doesNotMatch(html, /incremental-region-confirmed|Intended text confirmed|No supported character concerns/);
+  assert.match(html, /incremental-region-0:0:0:0/);
+  assert.match(html, /name="region-0:0:0:0-character-0"/);
+});
+
+test("live ready results retain selection IDs and one purple reminder without region cards", () => {
+  const sentence = { text: "我有三书。", start: 0, fingerprint: "sentence", status: "ready", result: {
+    correctedText: "我有三本书。", issues: [{ id: "one", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] } };
+  const html = render({ selectedIssueId: "grammar:sentence:one", onSelectIssue() {}, personalisedTip: "Measure-word reminder.",
+    state: { ...state, regions: [{ ...region, confirmed: true }], transcription: { text: "我有三书。" }, sentences: [sentence] } });
+  assert.match(html, /aria-pressed="true"/); assert.match(html, /bg-blue-200/);
+  assert.match(html, /Use 本 for books/); assert.match(html, /bg-violet-50/);
+  assert.equal(html.split("Measure-word reminder.").length - 1, 1);
+  assert.doesNotMatch(html, /incremental-region-|Intended text confirmed|Writing region/);
+});
+
+test("correct live feedback, empty state and collapsed manual options are retained", () => {
+  const html = render({ state: { ...state, regions: [{ ...region, confirmed: true }], sentences: [{ fingerprint: "correct", status: "ready",
+    result: { correctedText: "我是学生。", issues: [] } }] } });
+  assert.match(html, /Looks good/);
+  assert.match(html, /<details[^>]*><summary[^>]*>Review options/);
+  assert.match(html, /Check grammar manually/);
+  assert.doesNotMatch(html, /GCSE|No clear grammar mistakes found|<details[^>]* open/);
+  assert.match(render({ state: { ...state, regions: [], sentences: [], transcription: { text: "" } } }), /Write a Mandarin sentence to begin/);
 });

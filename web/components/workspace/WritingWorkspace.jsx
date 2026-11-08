@@ -274,10 +274,13 @@ export default function WritingWorkspace() {
           onKeyDown={(event) => { if (event.key === "Escape") closePanel(); }}
         >
           <div className="mb-5 flex items-center justify-between gap-2">
-            <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Writing Review</h2>
+            <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Your tutor</h2>
             <button type="button" onClick={closePanel} aria-label="Collapse Writing Review" className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-100 focus-visible:outline-2">Collapse</button>
           </div>
-          <IncrementalFeedback state={checking} checker={checkerActions} editing={editing} onSelectIssue={setSelectedIssueId} onDismissRegion={dismissRegion} />
+          <IncrementalFeedback state={checking} checker={checkerActions} editing={editing} selectedIssueId={selectedIssueId}
+            onSelectIssue={setSelectedIssueId} onDismissRegion={dismissRegion} personalisedTip={personalisedTip}
+            onResetHistory={() => { learnerMemoryRef.current?.resetLearningHistory(); setPersonalisedTip(null); }} />
+          <div className="mt-5 space-y-4 border-t border-neutral-100 pt-4">
           <MistakeNotifications history={history} selectedId={selectedMistakeId} onNavigate={navigateMistake}
             onDismiss={(entry) => dispatchHistory({ type: "dismiss", id: entry.id })} />
           {selectedMistake && !incrementalSelected && <section id="selected-character-correction" tabIndex={-1} className="mb-4 space-y-2 rounded-lg border border-blue-200 p-3 text-sm focus-visible:outline-2">
@@ -294,10 +297,13 @@ export default function WritingWorkspace() {
                 className="rounded border px-3 py-1 disabled:opacity-40">Review current writing</button>
             </> : <p>Choose the intended character below, then confirm the text.</p>}
           </section>}
+          <details open={loading || !!error || !!review} className="text-xs text-neutral-500">
+            <summary className="cursor-pointer focus-visible:outline-2">Manual review</summary>
+            <div className="mt-3">
           <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk && !editing} onReview={handleReview}
             reviewHighlights={history.occurrences.filter((entry) => entry.sourceReview === review && entry.detected).map((entry) => ({ id: entry.id, start: entry.start, end: entry.end }))}
             selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId}
-            personalisedTip={personalisedTip} onResetHistory={() => {
+            onResetHistory={() => {
               learnerMemoryRef.current?.resetLearningHistory();
               setPersonalisedTip(null);
             }}
@@ -310,6 +316,9 @@ export default function WritingWorkspace() {
               setSelections((current) => ({ ...current, [id]: undefined }));
             }}
             onConfirm={handleConfirm} />
+            </div>
+          </details>
+          </div>
         </aside>
       </div>
     </main>

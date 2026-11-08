@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import FeedbackPanel from "./FeedbackPanel";
+import FeedbackPanel, { GrammarFeedback, LearningTip, WritingText } from "./FeedbackPanel";
 import { requestIntentSuggestions } from "@/lib/review/client.mjs";
 
 function RegionCorrection({ region, checker, onDismiss }) {
@@ -26,9 +26,8 @@ function RegionCorrection({ region, checker, onDismiss }) {
   }
   return <div className="space-y-3">
     {region.review.characterCandidates?.some((entry) => entry.visuallyUncertain) &&
-      <p className="text-sm text-amber-900">Handwriting advisory: this shape differs from a limited reference. This does not prove missing strokes or incorrect stroke order.</p>}
-    {region.review.requiresTextConfirmation && <p className="text-sm text-neutral-700">{region.review.clarificationMessage}</p>}
-    <FeedbackPanel review={region.review} loading={loading} suggesting={loading} error={error} selections={selections}
+      <details className="text-xs text-neutral-500"><summary className="cursor-pointer">About this handwriting check</summary><p className="mt-2">This shape differs from a limited reference. This does not prove missing strokes or incorrect stroke order.</p></details>}
+    <FeedbackPanel verificationOnly review={region.review} loading={loading} suggesting={loading} error={error} selections={selections}
       onSelectCharacter={(id, char) => setSelections((value) => ({ ...value, [id]: char }))}
       confirmedText={edited} onEditText={setEdited} intentDescriptions={descriptions} intentSuggestions={suggestions}
       onDescribe={(id, value) => { setDescriptions((previous) => ({ ...previous, [id]: value })); setSuggestions((previous) => ({ ...previous, [id]: [] })); }}
@@ -43,60 +42,56 @@ function RegionCorrection({ region, checker, onDismiss }) {
   </div>;
 }
 
-export default function IncrementalFeedback({ state, checker, editing, onSelectIssue, onDismissRegion }) {
-  if (!state || !checker) return <p className="mb-4 text-sm text-neutral-500">Automatic character checking starts after you write.</p>;
+export default function IncrementalFeedback({ state, checker, editing, selectedIssueId, onSelectIssue, onDismissRegion,
+  personalisedTip, onResetHistory }) {
+  if (!state || !checker) return <section className="space-y-2"><h3 className="text-sm font-medium text-neutral-500">Your writing</h3><p className="text-sm text-neutral-400">Write a Mandarin sentence to begin.</p></section>;
   const dismissed = new Set(state.dismissed);
-  return <section aria-label="Automatic Mandarin checkers" className="mb-5 space-y-5 border-b pb-5 text-sm">
-    <section aria-label="Digital transcription">
-      <h3 className="font-semibold">Digital transcription</h3>
-      <p lang="zh-Hans" className="mt-2 whitespace-pre-wrap break-words rounded bg-neutral-50 p-3 text-lg">{state.transcription.text.replaceAll("\uFFFC", " [unread] ") || "Write in the grid to begin."}</p>
-      {state.regions.some((region) => region.status === "ready" && !region.text) && <p role="status" className="mt-2 text-amber-900">Some writing could not be recognised. Enter the intended Chinese below or retry recognition.</p>}
-      <p className="mt-2 text-xs text-neutral-500">Character checking starts after 1.5 seconds. Grammar waits for sentence punctuation and reliable or confirmed text.</p>
+  const unresolved = state.regions.filter((region) => !region.confirmed && !["pending", "loading"].includes(region.status));
+  const analysing = editing || state.regions.some((region) => ["pending", "loading"].includes(region.status)) || state.sentences.some((sentence) => sentence.status === "loading");
+  const ready = editing ? [] : state.sentences.filter((sentence) => sentence.status === "ready");
+  const textIssues = ready.flatMap((sentence) => sentence.result.issues.flatMap((issue) => {
+    const id = `grammar:${sentence.fingerprint}:${issue.id}`;
+    return dismissed.has(id) ? [] : [{ ...issue, id, start: (sentence.start ?? 0) + issue.start, end: (sentence.start ?? 0) + issue.end }];
+  }));
+  return <div className="space-y-5 text-sm leading-6">
+    <section aria-label="Your writing" className="space-y-2" aria-busy={analysing}>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-medium text-neutral-500">Your writing</h3>
+        {analysing && <span role="status" className="text-xs text-neutral-400">Analysing…</span>}
+      </div>
+      {state.transcription.text ? <WritingText text={state.transcription.text} issues={textIssues} selectedIssueId={selectedIssueId} onSelectIssue={onSelectIssue} />
+        : <p className="text-neutral-400">Write a Mandarin sentence to begin.</p>}
+      {state.error && <div role="alert"><p>{state.error}</p><button type="button" onClick={() => checker.recogniseNow()} className="text-xs underline">Retry character checking</button></div>}
     </section>
-    {editing ? <p role="status">Writing is changing. Affected results will be updated.</p> : <>
-      <section aria-label="Character checker" className="space-y-3">
-        <h3 className="font-semibold">Character checks</h3>
-        {state.error && <p role="alert">{state.error}</p>}
-        {!state.regions.length && <p>No handwriting to check.</p>}
-        {state.regions.map((region) => <section key={region.fingerprint} id={`incremental-region-${region.id}`} tabIndex={-1} className="space-y-2 rounded border border-neutral-200 p-3 focus-visible:outline-2">
-          <p className="font-medium">Writing region {region.top + 1}, {region.left + 1}</p>
-          {region.status === "pending" || region.status === "loading" ? <p role="status">{region.status === "pending" ? "Waiting for a pause in writing…" : "Recognising this region…"}</p>
-            : region.status === "error" ? <><p role="alert">{region.error}</p><button type="button" onClick={() => checker.recogniseNow()} className="underline">Retry character checking</button></>
-              : region.confirmed ? <><p lang="zh-Hans" className="text-lg">{region.text}</p><p>{region.review.requiresVerification ? "Intended text confirmed." : "No supported character concerns detected."}</p></>
-                : dismissed.has(`region:${region.fingerprint}`) ? <details><summary className="cursor-pointer">Dismissed suggestions — confirm transcription to enable grammar</summary>
-                  <RegionCorrection region={region} checker={checker} onDismiss={() => onDismissRegion(region)} /></details>
-                  : <RegionCorrection region={region} checker={checker} onDismiss={() => onDismissRegion(region)} />}
-        </section>)}
-        <p className="text-xs text-neutral-500">Stroke order is recorded. Stroke-order checking is not yet available.</p>
-      </section>
-      <section aria-label="Grammar checker" className="space-y-3">
-        <div className="flex items-center justify-between gap-2"><h3 className="font-semibold">GCSE grammar checks</h3>
-          <button type="button" onClick={() => checker.checkGrammar()} disabled={!state.regions.length} className="rounded border px-3 py-1 disabled:opacity-40">Check grammar</button></div>
-        {!state.sentences.length && <p>Complete a sentence, or use Check grammar without punctuation.</p>}
-        {state.sentences.map((sentence) => <section key={sentence.fingerprint} className="space-y-2 rounded border p-3">
-          <p lang="zh-Hans" className="text-lg">{sentence.text.replaceAll("\uFFFC", "□")}</p>
-          {sentence.status === "blocked" ? <p>Confirm the uncertain handwriting in this sentence before grammar checking.</p>
-            : sentence.status === "pending" ? <p>Waiting for sentence-ending punctuation, or Check grammar.</p>
-              : sentence.status === "loading" ? <p role="status">Checking grammar…</p>
-                : sentence.status === "error" ? <><p role="alert">{sentence.error}</p><button type="button" onClick={() => checker.checkGrammar()} className="underline">Retry grammar checking</button></>
-                  : <>
-                    {sentence.result.issues.length === 0 ? <p role="status">No clear grammar mistakes found.</p> : <>
-                      <p>Suggested text: <span lang="zh-Hans">{sentence.result.correctedText}</span></p>
-                      <ul className="space-y-2">{sentence.result.issues.map((issue) => {
-                        const id = `grammar:${sentence.fingerprint}:${issue.id}`;
-                        return dismissed.has(id) ? null : <li key={issue.id} className="space-y-2 rounded bg-blue-50 p-2">
-                          <button type="button" onClick={() => onSelectIssue(id)} className="text-left font-medium underline"><span lang="zh-Hans">{issue.original || "Insertion"} → {issue.replacement || "Remove"}</span></button>
-                          <p>{issue.explanation}</p>
-                          <details><summary className="cursor-pointer">Explanation details</summary><p>Category: {issue.type === "character" ? "Character choice in context" : issue.type.replaceAll("_", " ")}. {issue.explanation} This concerns sentence usage, not physical stroke formation.</p></details>
-                          <button type="button" onClick={() => checker.dismiss(id)} className="text-xs underline">Dismiss suggestion</button>
-                        </li>;
-                      })}</ul>
-                      <button type="button" onClick={() => checker.acceptSentence(sentence.fingerprint)} className="underline">Use suggested text in digital correction view</button>
-                    </>}
-                    {sentence.accepted && <p lang="zh-Hans" className="rounded bg-emerald-50 p-2">Digital correction: {sentence.result.correctedText}</p>}
-                  </>}
-        </section>)}
-      </section>
-    </>}
-  </section>;
+    {!editing && unresolved.length > 0 && <section aria-label="Character checks" className="space-y-4">
+      <h3 className="font-medium text-amber-900">Check these characters</h3>
+      {unresolved.map((region) => <section key={region.fingerprint} id={`incremental-region-${region.id}`} tabIndex={-1} className="focus-visible:outline-2">
+        {region.status === "error" ? <div className="space-y-2 rounded-xl bg-amber-50 p-3">
+          <p role="alert">{region.error}</p><button type="button" onClick={() => checker.recogniseNow()} className="text-xs underline">Retry character checking</button>
+        </div> : <RegionCorrection region={region} checker={checker} onDismiss={() => onDismissRegion(region)} />}
+        {dismissed.has(`region:${region.fingerprint}`) && <p className="mt-2 text-xs text-neutral-500">Confirm your intended text to continue.</p>}
+      </section>)}
+    </section>}
+    {!editing && (state.regions.length > 0 || state.sentences.length > 0) && <section aria-label="Grammar feedback" className="space-y-3">
+      <h3 className="text-sm font-medium text-neutral-500">Suggested correction</h3>
+      {ready.map((sentence) => <GrammarFeedback key={sentence.fingerprint} review={sentence.result} heading={false}
+        issues={sentence.result.issues.map((issue) => ({ ...issue, id: `grammar:${sentence.fingerprint}:${issue.id}` })).filter((issue) => !dismissed.has(issue.id))}
+        selectedIssueId={selectedIssueId} onSelectIssue={onSelectIssue} onDismiss={(id) => checker.dismiss(id)}
+        onAccept={() => checker.acceptSentence(sentence.fingerprint)} accepted={sentence.accepted} />)}
+      {!ready.length && <p className="text-neutral-500">{state.sentences.some((sentence) => sentence.status === "blocked")
+        ? "Confirm the characters above to continue." : analysing ? "Your feedback will appear here." : "Finish your sentence, or check grammar manually."}</p>}
+      {state.sentences.filter((sentence) => sentence.status === "error").map((sentence) => <div key={sentence.fingerprint} role="alert" className="space-y-1">
+        <p>{sentence.error}</p><button type="button" onClick={() => checker.checkGrammar()} className="text-xs underline">Retry grammar checking</button>
+      </div>)}
+    </section>}
+    {!editing && <LearningTip tip={personalisedTip} />}
+    {state.regions.length > 0 && <details className="text-xs text-neutral-500">
+      <summary className="cursor-pointer focus-visible:outline-2">Review options</summary>
+      <div className="mt-2 space-y-2">
+        <button type="button" onClick={() => checker.checkGrammar()} disabled={editing} className="block underline underline-offset-2 disabled:opacity-40">Check grammar manually</button>
+        <button type="button" onClick={() => checker.recogniseNow()} disabled={editing} className="block underline underline-offset-2 disabled:opacity-40">Retry recognition</button>
+        {onResetHistory && <button type="button" onClick={onResetHistory} className="block underline underline-offset-2">Reset learning history</button>}
+      </div>
+    </details>}
+  </div>;
 }
