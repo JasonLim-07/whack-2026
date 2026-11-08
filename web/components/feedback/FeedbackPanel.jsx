@@ -36,6 +36,7 @@ function CharacterVerification({ review, selections, onSelectCharacter, onConfir
       {review.characterCandidates.map((candidate) => (
         <fieldset key={candidate.position} className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
           <legend className="px-1 font-medium">Choose for <span lang="zh-Hans">{candidate.originalAttempt}</span></legend>
+          {candidate.visuallyUncertain && <p className="mb-2 text-neutral-600">Check this character.</p>}
           <div className="flex flex-wrap gap-2">
             {candidate.options.map((option) => (
               <label key={option.char} className="flex cursor-pointer items-center gap-2 rounded-md border border-neutral-200 bg-white px-3 py-2 has-checked:border-neutral-800">

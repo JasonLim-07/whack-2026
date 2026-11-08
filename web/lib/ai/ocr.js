@@ -435,19 +435,14 @@ export function buildThreeTierOcrResponse(normalizedResult) {
     ? normalizedResult.characters
     : [];
 
-<<<<<<< HEAD
   const confidence = normalizedResult?.provider === "gemini-vision"
     ? null : parseConfidence(normalizedResult?.confidence, false);
   // Keep source metadata for the review adapter; ranked text is only a suggestion.
   const source = { originalText: rawText, characters: chars, provider: normalizedResult?.provider };
-=======
-  const rawConf = parseConfidence(normalizedResult?.confidence);
-  const confidence = rawConf !== null ? rawConf : 0.0;
-  const segments = chars.map((c) => ({
-    text: String(c?.character || "").trim(),
-    confidence: parseConfidence(c?.confidence),
+  const segments = chars.map((character) => ({
+    text: String(character?.originalCharacter ?? character?.character ?? ""),
+    confidence: normalizedResult?.provider === "gemini-vision" ? null : parseConfidence(character?.confidence),
   }));
->>>>>>> origin/feature/ocr
 
   // Tier 3: Low Confidence (< 0.60) or empty/unreadable input -> NO context ranking
   if (!rawText.trim() || (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD)) {
@@ -630,13 +625,8 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
   const { image, strokes, canvas, language } = prepared;
   const strokeClusters = clusterStrokesIntoCharacters(strokes);
 
-<<<<<<< HEAD
-  if (options.mockResult) {
-    const normalized = normalizeForRouting(options.mockResult, {
-=======
   if (opts.mockResult) {
-    const normalized = normalizeOcrResult(opts.mockResult, {
->>>>>>> origin/feature/ocr
+    const normalized = normalizeForRouting(opts.mockResult, {
       strokeClusters,
       canvas,
       language,

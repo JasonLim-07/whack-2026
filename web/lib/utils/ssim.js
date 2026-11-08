@@ -29,8 +29,10 @@ export function decodePngBufferToRgba(pngBuffer) {
     const type = buf.toString("ascii", offset + 4, offset + 8);
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
+    if (dataEnd + 4 > buf.length) throw new Error("Truncated PNG chunk.");
 
     if (type === "IHDR") {
+      if (width || length !== 13) throw new Error("Invalid PNG dimension header.");
       width = buf.readUInt32BE(dataStart);
       height = buf.readUInt32BE(dataStart + 4);
       colorType = buf[dataStart + 9];
@@ -43,13 +45,14 @@ export function decodePngBufferToRgba(pngBuffer) {
     offset = dataEnd + 4; // Skip 4-byte CRC
   }
 
-  if (width <= 0 || height <= 0 || idatChunks.length === 0) {
+  if (width <= 0 || height <= 0 || width > 4096 || height > 4096 || idatChunks.length === 0) {
     throw new Error("Incomplete PNG chunks in buffer.");
   }
 
-  const decompressed = zlib.inflateSync(Buffer.concat(idatChunks));
   const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
   const stride = width * channels;
+  const decompressed = zlib.inflateSync(Buffer.concat(idatChunks), { maxOutputLength: height * (stride + 1) });
+  if (decompressed.length !== height * (stride + 1)) throw new Error("Invalid PNG pixel data length.");
   const rgba = new Uint8Array(width * height * 4);
   const prevRow = new Uint8Array(stride);
   const currRow = new Uint8Array(stride);
@@ -85,7 +88,7 @@ export function decodePngBufferToRgba(pngBuffer) {
       } else if (filterType === 4) {
         currRow[i] = (rawByte + paethPredictor(left, up, upLeft)) & 0xff;
       } else {
-        currRow[i] = rawByte;
+        throw new Error("Unsupported PNG row filter.");
       }
     }
 

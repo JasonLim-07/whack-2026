@@ -85,3 +85,12 @@ test("grammar cards and typed highlights retain selection alongside verification
   assert.match(loading, /Finding Chinese suggestions/);
   assert.match(loading, /You can keep writing/);
 });
+
+test("visual warning reuses character choices without claiming a stroke mistake", () => {
+  const review = { ...pending, characterCandidates: pending.characterCandidates.map((candidate) => ({ ...candidate, visuallyUncertain: true })) };
+  const panel = render({ review });
+  assert.match(panel, /Check this character/);
+  assert.match(panel, /type="radio"/);
+  assert.doesNotMatch(panel, /missing stroke|incorrect stroke|checked=""/i);
+  assert.match(panel, /disabled=""/);
+});

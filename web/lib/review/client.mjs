@@ -40,6 +40,7 @@ export function validateReview(review, revision) {
         candidate.position >= characters.length || positions.has(candidate.position) ||
         candidate.originalAttempt !== characters[candidate.position] ||
         (review.intentTargets ?? []).some((target) => candidate.position >= target.start && candidate.position < target.end) ||
+        (candidate.visuallyUncertain !== undefined && typeof candidate.visuallyUncertain !== "boolean") ||
         !validConfidence(candidate.confidence ?? null) || !Array.isArray(candidate.options) ||
         candidate.options.length < 2 || candidate.options.length > 3) throw new Error(INVALID_RESPONSE);
       const options = new Set();

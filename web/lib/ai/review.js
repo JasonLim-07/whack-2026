@@ -1,3 +1,4 @@
+import { findShapeCandidates } from "./reviewShape.js";
 import { validOcrCharacters } from "../review/locations.mjs";
 import { Buffer } from "node:buffer";
 import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
@@ -217,8 +218,10 @@ export async function reviewHandwriting(
   intentTargets.sort((a, b) => a.start - b.start || a.end - b.end);
   const unalignedText = segments.map((segment) => segment.text).join("") !== recognition.text;
   const ambiguous = coverage?.ambiguousOrdering || (intentTargets.length > 0 && unalignedText && (segments.length > 0 || coverage));
-  if (coverage || unexpectedLatin || intentTargets.length) {
-    const candidates = (recognition.characterCandidates ?? []).filter((candidate) =>
+  const shapeCandidates = ambiguous ? [] : findShapeCandidates(imageBuffer, spatial, characters, segments,
+    recognition.characterCandidates ?? [], intentTargets);
+  if (coverage || unexpectedLatin || intentTargets.length || shapeCandidates.length) {
+    const candidates = [...(recognition.characterCandidates ?? []), ...shapeCandidates].sort((a, b) => a.position - b.position).filter((candidate) =>
       !intentTargets.some((target) => candidate.position >= target.start && candidate.position < target.end));
     return {
       status: "LOW_CONFIDENCE", requiresVerification: true,
