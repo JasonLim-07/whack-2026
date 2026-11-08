@@ -1,6 +1,6 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview } from "./client.mjs";
+import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview, requestIntentSuggestions, validateIntentResult } from "./client.mjs";
 
 const review = (revision = 3) => ({
   recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], ocrCharacters: [], revision,
@@ -194,6 +194,36 @@ test("frontend verification to JSON confirmation runs grammar only after explici
   assert.equal(result.correctedText, "我有三本书。");
 });
 
+test("review upload forwards optional spatial metadata from the same export snapshot", async () => {
+  const spatial = { width: 120, height: 100, regions: [{ id: "0:0", row: 0, column: 0, ambiguous: false,
+    bounds: { x: 24, y: 24, width: 40, height: 50 } }] };
+  await requestReview({ image, spatial, strokes: [{ id: "local-only", points: [{ x: 10, y: 20 }] }] }, 3, undefined, async (_, options) => {
+    assert.equal(options.body.get("image").size, image.size);
+    assert.deepEqual(JSON.parse(options.body.get("spatial")), spatial);
+    assert.equal(options.body.get("revision"), "3");
+    assert.equal(options.body.has("strokes"), false);
+    assert.deepEqual([...options.body.keys()].sort(), ["image", "level", "revision", "spatial"]);
+    return Response.json(review());
+  });
+});
+
+test("whole-text clarification allows missing-character entry without guessing its position", () => {
+  const value = { ...verification(), recognizedText: "我", characterCandidates: [], requiresTextConfirmation: true,
+    clarificationMessage: "Check unmatched marks.", unresolvedRegions: [{ id: "0:1", row: 0, column: 1 }] };
+  assert.equal(validateReview(value, 3), value);
+  assert.equal(getConfirmedText(value, {}, "我有三书。"), "我有三书。");
+  assert.throws(() => getConfirmedText(value, {}, ""), /complete Chinese text/);
+  assert.throws(() => getConfirmedText(value, {}, "Hello"), /Chinese characters/);
+  assert.equal(getConfirmedText(value, {}, "我用iPhone。"), "我用iPhone。");
+  assert.throws(() => validateReview({ ...value, unresolvedRegions: [{}] }, 3), /unexpected response/);
+});
+
+test("Latin-only confirmation is rejected before any frontend request", async () => {
+  let calls = 0;
+  await assert.rejects(requestConfirmedReview("Hello，！", 3, undefined, async () => { calls++; }), /Chinese characters/);
+  assert.equal(calls, 0);
+});
+
 test("runner guards against duplicates during export and network; unlocks after success", async () => {
   const exported = deferred();
   const response = deferred();
@@ -269,6 +299,65 @@ test("frontend multipart request passes through the real backend handler and gra
   assert.deepEqual(result, review());
 });
 
+const intentReview = () => ({ ...verification(), recognizedText: "我有三□。", characterCandidates: [],
+  intentTargets: [{ id: "intent:3", start: 3, end: 4, original: "□" }] });
+const suggestions = { "intent:3": [{ text: "书", explanation: "Books." }, { text: "树", explanation: "Trees." }] };
+
+test("English-intent replacement requires explicit selection and preserves surrounding mistakes", () => {
+  assert.throws(() => getConfirmedText(intentReview(), {}, undefined, suggestions), /Choose a Chinese suggestion/);
+  assert.throws(() => getConfirmedText(intentReview(), { "intent:3": "本书" }, undefined, suggestions), /Choose a Chinese suggestion/);
+  assert.equal(getConfirmedText(intentReview(), { "intent:3": "书" }, undefined, suggestions), "我有三书。");
+});
+
+test("missing insertions and character choices compose without shifting original code-point positions", () => {
+  const pending = { ...verification(), recognizedText: "𠮷书。", characterCandidates: [{ position: 1, originalAttempt: "书", confidence: 0.75,
+    options: [{ char: "书", reason: "Original" }, { char: "韦", reason: "Alternative" }] }],
+    intentTargets: [{ id: "missing", start: 1, end: 1, original: "" }] };
+  assert.equal(getConfirmedText(pending, { missing: "有三", 1: "书" }, undefined, { missing: [{ text: "有三" }] }), "𠮷有三书。");
+});
+
+test("malformed or overlapping intent targets fail safely", () => {
+  for (const targets of [{}, null, [null], [{ id: "x", start: 3, end: 4, original: "错" }],
+    [{ id: "x", start: 3, end: 4, original: "□" }, { id: "y", start: 3, end: 4, original: "□" }]]) {
+    assert.throws(() => validateReview({ ...intentReview(), intentTargets: targets }, 3), /unexpected response/);
+  }
+});
+
+test("explicit English-intent request uses its own JSON endpoint and validates revision and Chinese options", async () => {
+  const result = { suggestions: suggestions["intent:3"], revision: 3 };
+  assert.deepEqual(await requestIntentSuggestions("books", "我有三[unclear]。", 3, undefined, async (url, init) => {
+    assert.equal(url, "/api/intent");
+    assert.deepEqual(JSON.parse(init.body), { description: "books", context: "我有三[unclear]。", revision: 3 });
+    return Response.json(result);
+  }), result);
+  for (const value of [{ ...result, revision: 4 }, { ...result, suggestions: [] },
+    { ...result, suggestions: [{ text: "books", explanation: "Wrong script" }] }]) {
+    assert.throws(() => validateIntentResult(value, 3), /unexpected response/);
+  }
+});
+
+test("intent request shares duplicate guards and ignores stale suggestions after drawing changes", async () => {
+  const waiting = deferred();
+  let count = 0;
+  const runner = createReviewRunner(() => { throw new Error("Must not export or OCR"); },
+    () => { throw new Error("Must not run grammar"); }, async () => { count++; return waiting.promise; });
+  const state = callbacks({ intent: "books", context: "我有三□。", exportImage: () => { throw new Error("No PNG export"); } });
+  const pending = runner.run(state.options);
+  assert.equal(await runner.run(state.options), false);
+  runner.cancel();
+  waiting.resolve({ suggestions: suggestions["intent:3"], revision: 3 });
+  await pending;
+  assert.equal(count, 1);
+  assert.deepEqual(state.events, ["start"]);
+});
+
+test("discarding a stray mark is explicit and allowed only for an omitted region", () => {
+  const missing = { ...intentReview(), recognizedText: "我有三书。", intentTargets: [{ id: "mark", start: 5, end: 5, original: "" }] };
+  assert.throws(() => getConfirmedText(missing, {}), /Choose/);
+  assert.equal(getConfirmedText(missing, { mark: "" }), "我有三书。");
+  assert.throws(() => getConfirmedText(intentReview(), { "intent:3": "" }), /Choose/);
+});
+
 test("snapshot metadata is delivered with its result; edits during export cancel old callbacks", async () => {
   const firstExport = deferred();
   let submissions = 0;
@@ -287,4 +376,126 @@ test("snapshot metadata is delivered with its result; edits during export cancel
   assert.deepEqual(captured.value, review());
   assert.deepEqual(first.events, ["start"]);
   assert.deepEqual(next.events, ["start", "finish"]);
+});
+
+test("combined snapshot retains spatial coverage through review and world origin for grammar highlights", async () => {
+  const { handleReview } = await import("../ai/review.js");
+  const { handwritingHighlights } = await import("./locations.mjs");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
+  const box = { x: 0, y: 0, width: 1, height: 1 };
+  const snapshot = { image: new Blob([png], { type: "image/png" }), revision: 3,
+    bounds: { left: -90, top: -20, width: 1, height: 1 },
+    spatial: { width: 1, height: 1, regions: [{ id: "0:0", row: 0, column: 0, ambiguous: false, bounds: box }] } };
+  const issue = { id: "one", start: 0, end: 1, type: "character", original: "书", replacement: "树", explanation: "Use the character for tree." };
+  let result;
+  const runner = createReviewRunner((payload, revision, signal) => requestReview(payload, revision, signal, async (_, init) => {
+    assert.deepEqual(JSON.parse(init.body.get("spatial")), snapshot.spatial);
+    return handleReview(new Request("http://localhost/api/review", init), {
+      recogniseHandwriting: async () => ({ text: "书", confidence: null, status: "SUCCESS", requiresVerification: false,
+        segments: [{ text: "书", confidence: 0.95, bounds: box }], characters: [{ text: "书", start: 0, end: 1, bounds: box }] }),
+      analyseGrammar: async () => ({ correctedText: "树", issues: [issue] }),
+    });
+  }));
+  await runner.run(callbacks({ exportSnapshot: async () => snapshot, onSuccess: (value, captured) => { result = { value, captured }; } }).options);
+  assert.equal(result.value.correctedText, "树");
+  assert.deepEqual(handwritingHighlights(result.value, result.captured.bounds), [{ issueId: "one", x: -90, y: -20, width: 1, height: 1 }]);
+});
+
+test("snapshot revision mismatch never reaches OCR and intent bypasses snapshot export", async () => {
+  let submissions = 0;
+  const runner = createReviewRunner(async () => { submissions++; }, undefined, async () => ({ revision: 3, suggestions: suggestions["intent:3"] }));
+  const mismatch = callbacks({ exportSnapshot: async () => ({ image, revision: 2 }) });
+  await runner.run(mismatch.options);
+  assert.equal(submissions, 0);
+  assert.deepEqual(mismatch.events, ["start", "finish"]);
+  const intent = callbacks({ intent: "book", context: "我有三[unclear]。", exportSnapshot: () => { throw new Error("Must not export"); } });
+  await runner.run(intent.options);
+  assert.deepEqual(intent.events, ["start", { revision: 3, suggestions: suggestions["intent:3"] }, "finish"]);
+});
+
+test("confirmed grammar feedback retains OCR boxes and highlights the same ink", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const { handwritingHighlights } = await import("./locations.mjs");
+  const { handleReview } = await import("../ai/review.js");
+  const box = { x: 30, y: 10, width: 20, height: 25 };
+  const source = { ...verification(), ocrCharacters: Array.from(verification().recognizedText,
+    (text, start) => ({ text, start, end: start + 1, bounds: box })) };
+  const selections = { 3: "书" };
+  const text = getConfirmedText(source, selections);
+  const issue = { id: "measure", start: 2, end: 4, original: "三书", replacement: "三本书", type: "grammar", explanation: "Use 本 for books." };
+  let located;
+  const runner = createReviewRunner(undefined, (value, revision, signal) => requestConfirmedReview(value, revision, signal,
+    async (_, init) => handleReview(new Request("http://localhost/api/review", init), {
+      analyseGrammar: async () => ({ correctedText: "我有三本书。", issues: [issue] }),
+      recogniseHandwriting: () => { throw new Error("Confirmation must not repeat OCR"); },
+    })));
+  await runner.run(callbacks({ text, exportSnapshot: () => { throw new Error("Must keep the original snapshot"); },
+    onSuccess(result) { located = restoreConfirmedLocations(result, source, selections); } }).options);
+  assert.ok(located);
+  assert.deepEqual(located.ocrCharacters, source.ocrCharacters);
+  assert.equal(validateReview(located, 3), located);
+  assert.deepEqual(handwritingHighlights(located, { left: -100, top: -20 }), [
+    { issueId: "measure", x: -70, y: -10, width: 20, height: 25 },
+    { issueId: "measure", x: -70, y: -10, width: 20, height: 25 },
+  ]);
+});
+
+test("confirmation shifts known locations around insertions without assigning ink to new text", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), characterCandidates: [], intentTargets: [{ id: "missing", start: 3, end: 3, original: "" }],
+    ocrCharacters: Array.from(verification().recognizedText, (text, start) => ({ text, start, end: start + 1,
+      bounds: { x: start * 20, y: 0, width: 15, height: 20 } })) };
+  const selections = { missing: "本" };
+  const suggestions = { missing: [{ text: "本" }] };
+  const text = getConfirmedText(source, selections, undefined, suggestions);
+  const result = restoreConfirmedLocations({ ...review(), recognizedText: text }, source, selections, undefined, suggestions);
+  assert.equal(result.ocrCharacters[3].bounds, null);
+  assert.deepEqual(result.ocrCharacters[4], { ...source.ocrCharacters[3], start: 4, end: 5 });
+  assert.equal(result.ocrCharacters.map((entry) => entry.text).join(""), text);
+  const stale = { ...review(), revision: 4 };
+  assert.equal(restoreConfirmedLocations(stale, source, selections), stale);
+});
+
+test("whole-sentence edits retain boxes only when the transcription is unchanged", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), requiresTextConfirmation: true, clarificationMessage: "Check the text.", unresolvedRegions: [],
+    ocrCharacters: Array.from(verification().recognizedText, (text, start) => ({ text, start, end: start + 1, bounds: null })) };
+  const unchanged = { ...review(), recognizedText: source.recognizedText };
+  assert.deepEqual(restoreConfirmedLocations(unchanged, source, {}, source.recognizedText).ocrCharacters, source.ocrCharacters);
+  const changed = { ...review(), recognizedText: "我有书。" };
+  assert.equal(restoreConfirmedLocations(changed, source, {}, changed.recognizedText), changed);
+});
+
+test("single-character confirmation preserves its box using Unicode code-point offsets", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), recognizedText: "𠀀书", characterCandidates: [{ position: 1, originalAttempt: "书", confidence: null,
+    options: [{ char: "书", reason: "Original" }, { char: "本", reason: "Alternative" }] }],
+    ocrCharacters: [{ text: "𠀀", start: 0, end: 1, bounds: null },
+      { text: "书", start: 1, end: 2, bounds: { x: 30, y: 10, width: 20, height: 25 } }] };
+  const confirmed = getConfirmedText(source, { 1: "本" });
+  const result = restoreConfirmedLocations({ ...review(), recognizedText: confirmed, issues: [] }, source, { 1: "本" });
+  assert.deepEqual(result.ocrCharacters[1], { ...source.ocrCharacters[1], text: "本" });
+  assert.equal(validateReview(result, 3), result);
+  assert.equal(source.ocrCharacters[1].text, "书");
+});
+
+test("categorized JSON grammar results reach learner memory without altering ranges or confirmation", async () => {
+  const { handleReview } = await import("../ai/review.js");
+  const { createLearnerMemory } = await import("../learning/memory.mjs");
+  const memory = createLearnerMemory(null);
+  for (const [revision, text, original, start, end] of [[1, "我有三个书。", "个", 3, 4], [2, "我有三书。", "三书", 2, 4]]) {
+    const result = await requestConfirmedReview(text, revision, undefined, async (_, init) => handleReview(new Request("http://localhost/api/review", init), {
+      recogniseHandwriting: async () => { throw new Error("OCR must not run"); },
+      analyseGrammar: async () => ({ correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", category: "measure_word",
+        original, start, end, replacement: original === "个" ? "本" : "三本书", explanation: "Use 本 for books." }] }),
+    }));
+    assert.equal(result.issues[0].category, "measure_word");
+    assert.equal(result.issues[0].start, start);
+    memory.recordCompletedReview(result, { sessionId: "workspace-a", revision });
+    memory.recordCompletedReview(result, { sessionId: "workspace-a", revision });
+    assert.equal(memory.getDifficultyCategories().categories.measure_word, revision);
+    assert.equal(Boolean(memory.getPersonalisedTip(result)), revision === 2);
+  }
+  const invalid = review(); invalid.issues[0].category = "invented";
+  assert.throws(() => validateReview(invalid, 3), /unexpected response/);
 });

@@ -524,3 +524,15 @@ The complete interaction must work in the browser without manually transferring 
 - Editing stays available during AI review. Starting an edit cancels the pending client request and clears stale results/overlays before the drawing revision changes. Late responses are ignored. Clear and Undo also invalidate review results.
 - Review retains the snapshot export origin locally. Convert OCR boxes to world coordinates by adding `bounds.left` and `bounds.top`; do not infer a character-to-cell mapping from grid order. Highlight only located existing characters; show insertion indicators in typed text, without assigning them to unrelated ink.
 - Feedback cards are keyboard-selectable and emphasise matching text/ink highlights. Selection does not move the viewport. Overlays, markers and guidance never enter PNG export.
+
+## Approved post-MVP incremental checking extension
+
+The user-requested incremental checkers extend the initial manual-only MVP scope.
+The main workspace recognises changed grid regions after a 1.5-second writing pause,
+keeps session transcription and recognition caches, and checks completed reliable
+or confirmed sentences automatically. A manual Check grammar action supports
+unfinished text. Original strokes, IDs, sequence and timestamps are preserved;
+Undo/Redo invalidates affected results and reuses unchanged recognition. The legacy
+Review endpoint and full PNG export contracts remain unchanged. Formation checks
+remain advisory, and reliable stroke-order assessment is explicitly unsupported.
+See `docs/incremental-checkers.md` for interfaces, limitations and verification.

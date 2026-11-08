@@ -1,12 +1,25 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { clampZoom, screenToWorld, worldToScreen, wheelDelta, zoomAt } from "./viewport.mjs";
+import { clampZoom, screenToWorld, worldToScreen, wheelDelta, zoomAt, focusViewport } from "./viewport.mjs";
 import { appendStroke, clearStrokes, undoStroke } from "./strokes.mjs";
 import { drawStroke, renderWhiteboard, visibleGrid } from "./render.mjs";
 
 function close(actual, expected) {
   assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} differs from ${expected}`);
 }
+
+test("notification navigation centres world ink while preserving zoom and source geometry", () => {
+  const bounds = { x: -200, y: 30, width: 80, height: 40 };
+  for (const zoom of [0.25, 0.75, 1]) {
+    const previous = { zoom, offsetX: 12, offsetY: 8 };
+    const next = focusViewport(previous, bounds, { width: 800, height: 600 });
+    assert.equal(next.zoom, zoom);
+    assert.deepEqual(worldToScreen({ x: -160, y: 50 }, next), { x: 400, y: 300 });
+    assert.deepEqual(previous, { zoom, offsetX: 12, offsetY: 8 });
+    assert.equal(focusViewport(previous, null, {}), previous);
+  }
+  assert.deepEqual(bounds, { x: -200, y: 30, width: 80, height: 40 });
+});
 
 test("coordinate transforms round-trip at negative offsets and every supported scale", () => {
   for (const zoom of [0.25, 0.381, 0.75, 1]) {

@@ -1,0 +1,11 @@
+<!-- Synthetic isolated handwriting regression sample, not the user's original stroke data. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="112" height="136" viewBox="0 0 112 136">
+  <rect width="112" height="136" fill="white"/>
+  <g transform="translate(24 24)" fill="none" stroke="#171717" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="27,8 31,16"/>
+    <polyline points="42,8 37,20"/>
+    <polyline points="18,23 51,23 52,42 21,42 18,54 51,54 51,72 41,75 34,68"/>
+    <polyline points="33,22 33,88"/>
+    <polyline points="32,58 12,76"/>
+  </g>
+</svg>

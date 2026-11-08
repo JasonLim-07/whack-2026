@@ -388,9 +388,13 @@ test("wired OCR adapter passes into standalone orchestration without paid reques
   assert.deepEqual(calls, ["ocr"]);
 });
 
-test("wired route rejects unreadable OCR and preserves rate-limit handling", async (t) => {
+test("wired route offers intent clarification for unreadable OCR and preserves rate-limit handling", async (t) => {
   let calls = mockRealProviders(t, { blank: true });
-  await expectError(await POST(request()), 422, "UNREADABLE_HANDWRITING");
+  const unreadable = await POST(request());
+  assert.equal(unreadable.status, 200);
+  const pending = await unreadable.json();
+  assert.equal(pending.requiresVerification, true);
+  assert.ok(pending.intentTargets.length > 0);
   assert.deepEqual(calls, ["ocr"]);
   calls = mockRealProviders(t, { fail: true });
   await expectError(await POST(request()), 429, "RATE_LIMITED");
@@ -446,8 +450,8 @@ test("actual POST routes high, medium, low and unknown confidence before grammar
   process.env.OCR_PROVIDER = "vision";
   for (const [confidence, status, grammarRuns] of [
     [0.95, 200, true], [0.90, 200, true], [0.899, 200, false],
-    [0.75, 200, false], [0.60, 200, false], [0.599, 422, false],
-    [0.40, 422, false], [null, 200, false], [undefined, 200, false],
+    [0.75, 200, false], [0.60, 200, false], [0.599, 200, false],
+    [0.40, 200, false], [null, 200, false], [undefined, 200, false],
   ]) {
     // Undefined must reach the provider JSON as a missing score.
     const calls = mockRealProviders(t, { confidence });
@@ -455,12 +459,13 @@ test("actual POST routes high, medium, low and unknown confidence before grammar
     assert.equal(response.status, status, `confidence ${confidence}`);
     const body = await response.json();
     assert.deepEqual(calls, grammarRuns ? ["ocr", "grammar"] : ["ocr"]);
-    if (status === 422) {
-      assert.equal(body.error.code, "UNREADABLE_HANDWRITING");
-    } else if (!grammarRuns) {
+    if (!grammarRuns) {
       assert.equal(body.requiresVerification, true);
       assert.equal(body.recognizedText, "我有两个书.");
-      assert.ok(body.characterCandidates.length > 0);
+      if (typeof confidence === "number" && confidence < 0.60) {
+        assert.ok(body.intentTargets.length > 0);
+        assert.equal(body.characterCandidates.length, 0);
+      } else assert.ok(body.characterCandidates.length > 0);
       for (const candidate of body.characterCandidates) {
         assert.ok(candidate.options.length >= 2 && candidate.options.length <= 3);
         assert.ok(candidate.options.some(({ char }) => char === candidate.originalAttempt));

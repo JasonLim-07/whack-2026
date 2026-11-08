@@ -1,6 +1,6 @@
 ﻿const buttonClass = "rounded-md border border-neutral-200 px-3 py-2 text-sm transition-colors hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-600 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent";
 
-export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom, onReturnToWriting, onUndo, onClear }) {
+export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom, onReturnToWriting, onUndo, onRedo, onClear }) {
   const percentage = ui.zoom === 1 ? "100%" : `${(ui.zoom * 100).toFixed(1)}%`;
   return (
     <div role="group" aria-label="Whiteboard controls" className="flex flex-wrap items-center gap-2">
@@ -20,6 +20,7 @@ export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom
         ))}
       </div>
       <button type="button" className={buttonClass} disabled={disabled || !ui.canUndo} onClick={onUndo} title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button type="button" className={buttonClass} disabled={disabled || !ui.canRedo} onClick={onRedo} title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
       <button type="button" className={buttonClass} disabled={disabled || !ui.count} onClick={onClear}>Clear</button>
       <div className="ml-auto flex items-center gap-3">
         <label className="flex items-center gap-2 text-sm text-neutral-600">

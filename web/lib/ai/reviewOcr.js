@@ -52,6 +52,7 @@ export function normaliseReviewOcrResult(result, dimensions) {
     segments: (result.characters || []).map((character) => ({
       text: character.originalCharacter,
       confidence: result.provider === "google-cloud-vision" ? character.confidence : null,
+      ...(character.bounds ? { bounds: character.bounds } : {}),
     })),
     characters: characterLocations(result, dimensions),
   };
@@ -59,8 +60,33 @@ export function normaliseReviewOcrResult(result, dimensions) {
 
 export async function recogniseHandwriting(imageBuffer, mimeType = "image/png") {
   if (mimeType !== "image/png") throw new TypeError("Review OCR requires a PNG image.");
+  return recogniseRegion(imageBuffer);
+}
+
+export async function recogniseRegion(imageBuffer, { signal, timeoutMs = 30000, recoverEmpty = false } = {}) {
   const dimensions = readPngDimensions(imageBuffer);
   // Explicit dimensions prevent Gemini boxes being scaled against the 800x400 fallback.
-  const result = await transcribeHandwriting({ image: imageBuffer, canvas: dimensions }, { skipCache: true });
+  const bounded = AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]);
+  const input = { image: imageBuffer, canvas: dimensions };
+  const transport = (url, init) => { bounded.throwIfAborted(); return fetch(url, { ...init, signal: bounded }); };
+  const result = await transcribeHandwriting(input, { skipCache: true, fetchImpl: transport });
+  const literal = result.originalText ?? result.text ?? "";
+  const model = process.env.GEMINI_OCR_MODEL?.trim() || process.env.GEMINI_MODEL?.trim();
+  const apiKey = process.env.GEMINI_OCR_API_KEY || process.env.GEMINI_API_KEY;
+  // Cloud Vision can return HTTP 200 with no detections for isolated handwriting.
+  // Recover once using the configured working vision-capable Gemini model. Its
+  // generated confidence scores remain unavailable, and intent needs confirmation.
+  if (recoverEmpty && !literal.trim() && result.provider !== "gemini-vision" && model && apiKey) {
+    try {
+      const recovered = await transcribeHandwriting(input, { provider: "gemini", model, apiKey, skipCache: true, fetchImpl: transport });
+      if ((recovered.originalText ?? recovered.text ?? "").trim()) {
+        return { ...normaliseReviewOcrResult(recovered, dimensions), recoveryProvider: "gemini-vision" };
+      }
+    } catch (error) {
+      if (bounded.aborted || error.status === 429) throw error;
+      // Preserve the literal empty result when recovery is unavailable. The UI
+      // retains the real writing region and offers direct confirmation/retry.
+    }
+  }
   return normaliseReviewOcrResult(result, dimensions);
 }
