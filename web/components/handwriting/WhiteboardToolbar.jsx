@@ -1,6 +1,6 @@
 ﻿const buttonClass = "rounded-md border border-neutral-200 px-3 py-2 text-sm transition-colors hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-600 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent";
 
-export default function WhiteboardToolbar({ ui, onTool, onZoom, onUndo, onClear }) {
+export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom, onUndo, onClear }) {
   const percentage = ui.zoom === 1 ? "100%" : `${(ui.zoom * 100).toFixed(1)}%`;
   return (
     <div role="group" aria-label="Whiteboard controls" className="flex flex-wrap items-center gap-2">
@@ -10,6 +10,7 @@ export default function WhiteboardToolbar({ ui, onTool, onZoom, onUndo, onClear 
             key={tool}
             type="button"
             aria-pressed={ui.tool === tool}
+            disabled={disabled && tool !== "hand"}
             title={tool === "eraser" ? "Erase whole strokes (undoable)" : undefined}
             onClick={() => onTool(tool)}
             className={`${buttonClass} ${ui.tool === tool ? "bg-neutral-900 text-white hover:bg-neutral-800" : "bg-white text-neutral-700"}`}
@@ -18,8 +19,8 @@ export default function WhiteboardToolbar({ ui, onTool, onZoom, onUndo, onClear 
           </button>
         ))}
       </div>
-      <button type="button" className={buttonClass} disabled={!ui.canUndo} onClick={onUndo} title="Undo (Ctrl/Cmd+Z)">Undo</button>
-      <button type="button" className={buttonClass} disabled={!ui.count} onClick={onClear}>Clear</button>
+      <button type="button" className={buttonClass} disabled={disabled || !ui.canUndo} onClick={onUndo} title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button type="button" className={buttonClass} disabled={disabled || !ui.count} onClick={onClear}>Clear</button>
       <div className="ml-auto flex items-center gap-3">
         <label className="flex items-center gap-2 text-sm text-neutral-600">
           <span className="sr-only">Zoom</span>

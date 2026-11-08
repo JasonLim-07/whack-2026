@@ -1,11 +1,12 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { screenToWorld, wheelDelta, zoomAt } from "@/lib/handwriting/viewport.mjs";
 import { renderBoundaryWarnings, renderWhiteboard } from "@/lib/handwriting/render.mjs";
 import { appendStroke, clearStrokes, commitEdit, undoEdit } from "@/lib/handwriting/strokes.mjs";
 
 import { cellAt, flagBoundaryCrossing, invalidCells, pruneWarnings } from "@/lib/handwriting/boundaries.mjs";
+import { exportStrokes } from "@/lib/handwriting/export.mjs";
 import { eraseStrokes } from "@/lib/handwriting/eraser.mjs";
 
 export default function useWhiteboard({ disabled, onChange }) {
@@ -21,7 +22,7 @@ export default function useWhiteboard({ disabled, onChange }) {
   const revisionRef = useRef(0);
   const [ui, setUi] = useState({ tool: "pen", zoom: 1, count: 0, canUndo: false, panning: false, space: false });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     optionsRef.current = { disabled, onChange };
     if (disabled) controllerRef.current?.cancel();
   }, [disabled, onChange]);
@@ -204,6 +205,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     }
 
     function undo() {
+      if (optionsRef.current.disabled) return;
       cancel();
       if (!historyRef.current.length) return;
       const restored = undoEdit(historyRef.current, strokesRef.current);
@@ -213,6 +215,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     }
 
     function clear() {
+      if (optionsRef.current.disabled) return;
       cancel();
       if (!strokesRef.current.length || !window.confirm("Clear all handwriting? This cannot be undone.")) return;
       strokesRef.current = clearStrokes(strokesRef.current);
@@ -261,7 +264,12 @@ export default function useWhiteboard({ disabled, onChange }) {
       cancel,
       undo,
       clear,
+      exportImage() {
+        cancel();
+        return exportStrokes(strokesRef.current);
+      },
       selectTool(nextTool) {
+        if (optionsRef.current.disabled && nextTool !== "hand") return;
         cancel();
         tool = nextTool;
         setUi((previous) => ({ ...previous, tool }));
@@ -313,6 +321,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     rootRef,
     canvasRef,
     ui,
+    exportImage: () => controllerRef.current ? controllerRef.current.exportImage() : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
     selectTool: (tool) => controllerRef.current?.selectTool(tool),
     setZoom: (zoom) => controllerRef.current?.setZoom(zoom),
     undo: () => controllerRef.current?.undo(),
