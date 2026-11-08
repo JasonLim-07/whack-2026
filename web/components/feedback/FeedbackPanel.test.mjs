@@ -94,3 +94,10 @@ test("visual warning reuses character choices without claiming a stroke mistake"
   assert.doesNotMatch(panel, /missing stroke|incorrect stroke|checked=""/i);
   assert.match(panel, /disabled=""/);
 });
+
+test("uncertain handwriting has typed emphasis and a focusable correction target before grammar", () => {
+  const html = render({ review: pending, selectedIssueId: "mistake-1", reviewHighlights: [{ id: "mistake-1", start: 3, end: 4 }] });
+  assert.match(html, /<mark/); assert.match(html, /bg-blue-200/);
+  assert.match(html, /id="character-choice-3" tabindex="-1"/);
+  assert.doesNotMatch(html, /Grammar Suggestions/);
+});

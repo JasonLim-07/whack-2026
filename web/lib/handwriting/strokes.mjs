@@ -22,3 +22,8 @@ export function undoEdit(history, strokes) {
     ? { history: history.slice(0, -1), strokes: history.at(-1) }
     : { history, strokes };
 }
+
+export function redoEdit(future, history, strokes) {
+  return future.length ? { future: future.slice(0, -1), history: [...history, strokes], strokes: future.at(-1) }
+    : { future, history, strokes };
+}

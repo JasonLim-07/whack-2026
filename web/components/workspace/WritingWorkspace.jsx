@@ -1,10 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
 import { handwritingHighlights } from "@/lib/review/locations.mjs";
 import { createReviewRunner, getConfirmedText, restoreConfirmedLocations } from "@/lib/review/client.mjs";
+import { emptyMistakeHistory, mistakeReducer, mistakeOverlays } from "@/lib/review/mistakes.mjs";
+import MistakeNotifications, { MistakeWarnings } from "@/components/feedback/MistakeNotifications";
+import IncrementalFeedback from "@/components/feedback/IncrementalFeedback";
+import { createIncrementalChecker } from "@/lib/review/incrementalChecker.mjs";
 
 export default function WritingWorkspace() {
   const canvasRef = useRef(null);
@@ -13,6 +17,16 @@ export default function WritingWorkspace() {
   const runnerRef = useRef(null);
   const reviewRef = useRef(null);
   const pendingRef = useRef(false);
+  const checkerRef = useRef(null);
+  const [checking, setChecking] = useState(null);
+  const checkerActions = useMemo(() => ({
+    recogniseNow: () => checkerRef.current?.recogniseNow(),
+    checkGrammar: () => checkerRef.current?.checkGrammar(),
+    confirm: (...args) => checkerRef.current?.confirm(...args),
+    dismiss: (key) => checkerRef.current?.dismiss(key),
+    acceptSentence: (key) => checkerRef.current?.acceptSentence(key),
+    retryRegion: (...args) => checkerRef.current?.retryRegion(...args),
+  }), []);
   const editingRef = useRef(false);
   const [hasInk, setHasInk] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -22,7 +36,20 @@ export default function WritingWorkspace() {
   const [editing, setEditing] = useState(false);
   const [snapshotBounds, setSnapshotBounds] = useState(null);
   const [selectedIssueId, setSelectedIssueId] = useState(null);
-  const highlights = useMemo(() => handwritingHighlights(review, snapshotBounds), [review, snapshotBounds]);
+  const [history, dispatchHistory] = useReducer(mistakeReducer, undefined, emptyMistakeHistory);
+  const [selectedMistakeId, setSelectedMistakeId] = useState(null);
+  const selectedMistake = history.occurrences.find((entry) => entry.id === selectedMistakeId);
+  const incrementalSelected = checking?.regions.some((region) => region.review === selectedMistake?.sourceReview);
+  const historicalSelection = selectedMistake && (selectedMistake.sourceReview !== review || selectedMistake.changed || !selectedMistake.live);
+  const highlights = useMemo(() => {
+    const grammar = (checking?.sentences ?? []).flatMap((sentence) => sentence.status === "ready" ? sentence.result.issues.flatMap((issue) => {
+      const id = `grammar:${sentence.fingerprint}:${issue.id}`;
+      if (checking.dismissed.includes(id) || issue.start === issue.end) return [];
+      return sentence.characters.filter((character) => character.bounds && character.start < issue.end && character.end > issue.start)
+        .map((character) => ({ ...character.bounds, issueId: id }));
+    }) : []);
+    return [...handwritingHighlights(review, snapshotBounds), ...mistakeOverlays(history), ...grammar];
+  }, [review, snapshotBounds, history, checking]);
   const [selections, setSelections] = useState({});
   const [confirmedText, setConfirmedText] = useState("");
   const [intentDescriptions, setIntentDescriptions] = useState({});
@@ -35,6 +62,15 @@ export default function WritingWorkspace() {
     const runner = createReviewRunner();
     runnerRef.current = runner;
     return () => { runner.cancel(); runnerRef.current = null; };
+  }, []);
+
+  useEffect(() => {
+    const checker = createIncrementalChecker({ onState: setChecking,
+      onObservation: (result, snapshot, allStrokes) => dispatchHistory({ type: "review", review: result, snapshot, allStrokes }),
+      onConfirmation: (current, choices, suggestions, text) => dispatchHistory({ type: "confirm", review: current, selections: choices, intentSuggestions: suggestions, confirmedText: text }),
+    });
+    checkerRef.current = checker;
+    return () => { checker.dispose(); checkerRef.current = null; };
   }, []);
 
   useEffect(() => {
@@ -61,17 +97,21 @@ export default function WritingWorkspace() {
   const handleEditStart = useCallback(() => {
     editingRef.current = true;
     setEditing(true);
+    checkerRef.current?.setEditing(true);
     invalidateReview();
   }, [invalidateReview]);
 
   const handleEditEnd = useCallback(() => {
     editingRef.current = false;
     setEditing(false);
+    checkerRef.current?.setEditing(false);
   }, []);
 
   const handleDrawingChange = useCallback((drawing) => {
     drawingRef.current = drawing;
     setHasInk(drawing.hasInk);
+    dispatchHistory({ type: "drawing", strokes: drawing.strokes });
+    checkerRef.current?.update(drawing);
     invalidateReview();
   }, [invalidateReview]);
 
@@ -91,6 +131,7 @@ export default function WritingWorkspace() {
         setLoading(true);
         setSelectedIssueId(null);
         if (!confirming) {
+          setSelectedMistakeId(null);
           setSnapshotBounds(null);
           reviewRef.current = null;
           setReview(null);
@@ -104,7 +145,10 @@ export default function WritingWorkspace() {
         setPanelOpen(true);
       },
       onSuccess(result, snapshot) {
-        if (snapshot) setSnapshotBounds(snapshot.bounds);
+        if (snapshot) {
+          setSnapshotBounds(snapshot.bounds);
+          dispatchHistory({ type: "review", review: result, snapshot });
+        }
         const locatedResult = confirming
           ? restoreConfirmedLocations(result, confirmationSource, selections, confirmedText, intentSuggestions)
           : result;
@@ -123,7 +167,13 @@ export default function WritingWorkspace() {
   function handleConfirm() {
     const current = reviewRef.current;
     if (!current?.requiresVerification || current.revision !== drawingRef.current.revision) return;
-    try { handleReview(getConfirmedText(current, selections, confirmedText, intentSuggestions)); }
+    if (editingRef.current || pendingRef.current) return;
+    try {
+      const text = getConfirmedText(current, selections, confirmedText, intentSuggestions);
+      // Explicit intent is valid evidence even if the subsequent grammar call fails.
+      dispatchHistory({ type: "confirm", review: current, selections, intentSuggestions });
+      handleReview(text);
+    }
     catch (confirmationError) { setError(confirmationError.message); }
   }
 
@@ -157,6 +207,31 @@ export default function WritingWorkspace() {
     requestAnimationFrame(() => document.getElementById("open-writing-review")?.focus());
   }
 
+  function navigateMistake(entry) {
+    setSelectedMistakeId(entry.id);
+    setSelectedIssueId(entry.id);
+    setPanelOpen(true);
+    if (entry.live && !entry.changed && entry.bounds) canvasRef.current?.focusBounds(entry.bounds);
+    requestAnimationFrame(() => {
+      const region = checkerRef.current?.getState().regions.find((item) => item.review === entry.sourceReview);
+      if (region) {
+        const control = typeof entry.choiceKey === "number" ? `character-choice-${entry.choiceKey}` : `intent-choice-${encodeURIComponent(entry.choiceKey)}`;
+        const target = document.getElementById(`region-${region.id}-${control}`) ?? document.getElementById(`incremental-region-${region.id}`);
+        target?.focus({ preventScroll: true }); target?.scrollIntoView({ block: "nearest" }); return;
+      }
+      const current = entry.sourceReview === reviewRef.current && entry.live && !entry.changed;
+      const controlId = typeof entry.choiceKey === "number" ? `character-choice-${entry.choiceKey}` : `intent-choice-${encodeURIComponent(entry.choiceKey)}`;
+      const target = document.getElementById(current ? controlId : "selected-character-correction");
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function dismissRegion(region) {
+    checkerRef.current?.dismiss(`region:${region.fingerprint}`);
+    dispatchHistory({ type: "dismiss", review: region.review });
+  }
+
   const panelVisibility = panelOpen === null ? "hidden lg:flex" : panelOpen ? "flex" : "hidden";
   const openerVisibility = panelOpen === null ? "lg:hidden" : panelOpen ? "hidden" : "";
 
@@ -177,9 +252,10 @@ export default function WritingWorkspace() {
           className={`${openerVisibility} rounded-lg border border-neutral-200 px-3 py-2 text-sm hover:bg-neutral-50 focus-visible:outline-2 focus-visible:outline-offset-2`}
         >Open Writing Review</button>
       </header>
+      <MistakeWarnings history={history} onNavigate={navigateMistake} onDismiss={(ids) => dispatchHistory({ type: "acknowledge", ids })} />
       <div className="flex min-h-0 flex-1 gap-6">
         {/* Keep the canvas mounted here across every panel/layout state. */}
-        <HandwritingCanvas ref={canvasRef} onChange={handleDrawingChange} onEditStart={handleEditStart} onEditEnd={handleEditEnd} grammarHighlights={highlights} selectedIssueId={selectedIssueId} />
+        <HandwritingCanvas ref={canvasRef} onChange={handleDrawingChange} onEditStart={handleEditStart} onEditEnd={handleEditEnd} grammarHighlights={editing ? [] : highlights} selectedIssueId={selectedIssueId} />
         <aside
           id="writing-review-panel" aria-labelledby="writing-review-heading"
           className={`${panelVisibility} fixed inset-x-0 bottom-0 z-20 max-h-[60dvh] flex-col overflow-y-auto rounded-t-xl border border-neutral-200 bg-white p-5 shadow-lg lg:static lg:z-auto lg:max-h-none lg:w-[360px] lg:shrink-0 lg:rounded-xl lg:shadow-none`}
@@ -189,7 +265,25 @@ export default function WritingWorkspace() {
             <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Writing Review</h2>
             <button type="button" onClick={closePanel} aria-label="Collapse Writing Review" className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-100 focus-visible:outline-2">Collapse</button>
           </div>
+          <IncrementalFeedback state={checking} checker={checkerActions} editing={editing} onSelectIssue={setSelectedIssueId} onDismissRegion={dismissRegion} />
+          <MistakeNotifications history={history} selectedId={selectedMistakeId} onNavigate={navigateMistake}
+            onDismiss={(entry) => dispatchHistory({ type: "dismiss", id: entry.id })} />
+          {selectedMistake && !incrementalSelected && <section id="selected-character-correction" tabIndex={-1} className="mb-4 space-y-2 rounded-lg border border-blue-200 p-3 text-sm focus-visible:outline-2">
+            <h3 className="font-medium">Selected handwriting check</h3>
+            <p lang="zh-Hans">{selectedMistake.recognized || "Unclear writing"}</p>
+            {!selectedMistake.bounds && <p>Location unavailable. Use the character choices below.</p>}
+            {historicalSelection ? <>
+              <p>This is an earlier review. Review the current writing before confirming a correction.</p>
+              <fieldset disabled className="opacity-70"><legend className="sr-only">Earlier correction choices</legend>
+                <FeedbackPanel review={selectedMistake.sourceReview} loading={false} error={null} selections={{}} controlIdPrefix="history-"
+                  intentDescriptions={{}} intentSuggestions={{}} onReview={() => {}} onConfirm={() => {}} />
+              </fieldset>
+              <button type="button" onClick={() => { setSelectedMistakeId(null); handleReview(); }} disabled={!hasInk || loading || editing}
+                className="rounded border px-3 py-1 disabled:opacity-40">Review current writing</button>
+            </> : <p>Choose the intended character below, then confirm the text.</p>}
+          </section>}
           <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk && !editing} onReview={handleReview}
+            reviewHighlights={history.occurrences.filter((entry) => entry.sourceReview === review && entry.detected).map((entry) => ({ id: entry.id, start: entry.start, end: entry.end }))}
             selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId}
             selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
             confirmedText={confirmedText} onEditText={setConfirmedText} suggesting={suggesting}

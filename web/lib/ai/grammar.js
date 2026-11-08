@@ -33,6 +33,9 @@ const TUTOR_INSTRUCTIONS = `You are a careful Chinese language tutor reviewing t
 Analyse Simplified Chinese for clear grammar, measure-word, word-choice and
 character-usage mistakes. Return corrected Simplified Chinese and concise,
 helpful English explanations adapted to the supplied learner level.
+For gcse learners, focus on word order, measure words, particles (including 了,
+的, 得 and 地), negation, and question structures. Preserve the intended meaning;
+give minimal corrections and explain the rule in accessible English.
 Accept multiple valid Chinese expressions. Avoid stylistic rewrites, invented
 mistakes and uncertain corrections. Never claim to assess handwritten strokes.
 If there are no clear mistakes, return issues: [] and the input text unchanged
@@ -163,6 +166,7 @@ export async function analyseGrammar(text, options = {}) {
       model: process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash",
       contents: JSON.stringify({ text, level }),
       config: {
+        ...(options.signal ? { abortSignal: options.signal } : {}),
         systemInstruction: TUTOR_INSTRUCTIONS,
         responseMimeType: "application/json",
         responseJsonSchema: GRAMMAR_RESPONSE_SCHEMA,

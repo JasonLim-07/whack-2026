@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
 import { checkWritingCoverage, validBounds, validSpatialMetadata } from "./coverage.mjs";
 import { hasLatinText, isLatinOnlyText, CHINESE_TEXT_MESSAGE } from "../review/text.mjs";
+import { readPngDimensions } from "./reviewOcr.js";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // Bound the entire multipart body too, allowing 64 KiB for fields and headers.
@@ -161,7 +162,7 @@ async function reviewText(text, level, revision, grammar, confidence = null, seg
 
 /** Orchestrate already-validated input; dependencies are injected only by server code. */
 export async function reviewHandwriting(
-  { imageBuffer, level = "beginner", revision = null, spatial },
+  { imageBuffer, level = "beginner", revision = null, spatial, recognitionOnly = false },
   { recogniseHandwriting, analyseGrammar: grammar = analyseGrammar } = {},
 ) {
   if (typeof recogniseHandwriting !== "function") {
@@ -194,6 +195,13 @@ export async function reviewHandwriting(
     throw new ReviewError(502, "INVALID_OCR_RESPONSE", "Recognition provider returned invalid character locations.");
   }
 
+  if (recognitionOnly && recognition.recoveryProvider) {
+    return { status: "LOW_CONFIDENCE", requiresVerification: true, requiresTextConfirmation: true,
+      recognizedText: recognition.text, ocrConfidence: recognition.confidence, ocrSegments: segments, ocrCharacters: characters,
+      characterCandidates: [], intentTargets: [], unresolvedRegions: [], revision,
+      clarificationMessage: "The first recognizer could not read this square. Check or edit the recovered text before confirming it." };
+  }
+
   const coverage = checkWritingCoverage(spatial, segments);
   const unexpectedLatin = hasLatinText(recognition.text);
   const intentTargets = [];
@@ -206,7 +214,10 @@ export async function reviewHandwriting(
   for (const segment of segments) {
     const start = offset;
     offset += Array.from(segment.text).length;
-    if (segment.confidence !== null && segment.confidence < 0.60 &&
+    const uncertain = recognitionOnly ? segment.confidence === null || segment.confidence < 0.90
+      : segment.confidence !== null && segment.confidence < 0.60;
+    const alreadyHasChoices = recognitionOnly && (recognition.characterCandidates ?? []).some((candidate) => candidate.position >= start && candidate.position < offset);
+    if (uncertain && !alreadyHasChoices &&
       !intentTargets.some((target) => target.start < offset && target.end > start)) {
       intentTargets.push({ id: `intent:${start}`, start, end: offset, original: segment.text });
     }
@@ -248,6 +259,8 @@ export async function reviewHandwriting(
       revision,
     };
   }
+  if (recognitionOnly) return { recognizedText: recognition.text, ocrConfidence: recognition.confidence,
+    ocrSegments: segments, ocrCharacters: characters, status: "SUCCESS", requiresVerification: false, characterCandidates: [], revision };
   return reviewText(recognition.text, level, revision, grammar, recognition.confidence, segments, characters);
 }
 
@@ -255,9 +268,15 @@ export async function reviewHandwriting(
 export async function handleReview(request, dependencies = {}) {
   try {
     const input = await readReviewRequest(request);
+    if (dependencies.recognitionOnly) {
+      let dimensions;
+      try { dimensions = readPngDimensions(input.imageBuffer); }
+      catch { throw new ReviewError(400, "INVALID_IMAGE", "A valid PNG region is required."); }
+      if (dimensions.width > 4096 || dimensions.height > 4096) throw new ReviewError(413, "IMAGE_TOO_LARGE", "Writing regions must not exceed 4096 pixels per side.");
+    }
     const review = Object.hasOwn(input, "text")
       ? await reviewText(input.text, input.level, input.revision, dependencies.analyseGrammar || analyseGrammar)
-      : await reviewHandwriting(input, dependencies);
+      : await reviewHandwriting({ ...input, recognitionOnly: dependencies.recognitionOnly === true }, dependencies);
     return Response.json(review);
   } catch (error) {
     if (error instanceof ReviewError) {
@@ -265,4 +284,18 @@ export async function handleReview(request, dependencies = {}) {
     }
     return Response.json({ error: { code: "INTERNAL_ERROR", message: "Unable to review handwriting." } }, { status: 500 });
   }
+}
+
+export function handleRecognition(request, dependencies) {
+  if (!/^multipart\/form-data\s*;/i.test(request.headers.get("content-type") ?? "")) {
+    return Response.json({ error: { code: "INVALID_REQUEST", message: "Expected a PNG region using multipart/form-data." } }, { status: 400 });
+  }
+  return handleReview(request, { ...dependencies, recognitionOnly: true });
+}
+
+export function handleGrammar(request, dependencies = {}) {
+  if (!/^application\/json\s*(?:;|$)/i.test(request.headers.get("content-type") ?? "")) {
+    return Response.json({ error: { code: "INVALID_REQUEST", message: "Expected Chinese text using application/json." } }, { status: 400 });
+  }
+  return handleReview(request, dependencies);
 }

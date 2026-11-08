@@ -197,10 +197,12 @@ test("frontend verification to JSON confirmation runs grammar only after explici
 test("review upload forwards optional spatial metadata from the same export snapshot", async () => {
   const spatial = { width: 120, height: 100, regions: [{ id: "0:0", row: 0, column: 0, ambiguous: false,
     bounds: { x: 24, y: 24, width: 40, height: 50 } }] };
-  await requestReview({ image, spatial }, 3, undefined, async (_, options) => {
+  await requestReview({ image, spatial, strokes: [{ id: "local-only", points: [{ x: 10, y: 20 }] }] }, 3, undefined, async (_, options) => {
     assert.equal(options.body.get("image").size, image.size);
     assert.deepEqual(JSON.parse(options.body.get("spatial")), spatial);
     assert.equal(options.body.get("revision"), "3");
+    assert.equal(options.body.has("strokes"), false);
+    assert.deepEqual([...options.body.keys()].sort(), ["image", "level", "revision", "spatial"]);
     return Response.json(review());
   });
 });

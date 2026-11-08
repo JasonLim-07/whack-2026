@@ -115,6 +115,9 @@ export function restoreConfirmedLocations(result, source, selections, editedText
   const original = source.ocrCharacters ?? [];
   if (!original.length || !validOcrCharacters(original, source.recognizedText)) return result;
   if (source.requiresTextConfirmation === true) {
+    if (/^\p{Script=Han}$/u.test(source.recognizedText) && /^\p{Script=Han}$/u.test(result.recognizedText)) {
+      return { ...result, ocrCharacters: original.map((entry) => ({ ...entry, text: result.recognizedText })) };
+    }
     return source.recognizedText === result.recognizedText ? { ...result, ocrCharacters: original } : result;
   }
   const points = Array.from(source.recognizedText);
