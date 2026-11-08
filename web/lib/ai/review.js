@@ -5,6 +5,7 @@ import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
 import { checkWritingCoverage, validBounds, validSpatialMetadata } from "./coverage.mjs";
 import { hasLatinText, isLatinOnlyText, CHINESE_TEXT_MESSAGE } from "../review/text.mjs";
 import { readPngDimensions } from "./reviewOcr.js";
+import { RECOGNITION_POLICY, needsRecognitionReview, isPunctuationOnly } from "./recognitionPolicy.mjs";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // Bound the entire multipart body too, allowing 64 KiB for fields and headers.
@@ -194,6 +195,8 @@ export async function reviewHandwriting(
   if (!validOcrCharacters(characters, recognition.text)) {
     throw new ReviewError(502, "INVALID_OCR_RESPONSE", "Recognition provider returned invalid character locations.");
   }
+  const recognitionCandidates = (recognition.characterCandidates ?? []).filter((candidate) =>
+    !candidate.visuallyUncertain && !isPunctuationOnly(candidate.originalAttempt) && needsRecognitionReview(candidate.confidence));
 
   if (recognitionOnly && recognition.recoveryProvider) {
     return { status: "LOW_CONFIDENCE", requiresVerification: true, requiresTextConfirmation: true,
@@ -214,9 +217,8 @@ export async function reviewHandwriting(
   for (const segment of segments) {
     const start = offset;
     offset += Array.from(segment.text).length;
-    const uncertain = recognitionOnly ? segment.confidence === null || segment.confidence < 0.90
-      : segment.confidence !== null && segment.confidence < 0.60;
-    const alreadyHasChoices = recognitionOnly && (recognition.characterCandidates ?? []).some((candidate) => candidate.position >= start && candidate.position < offset);
+    const uncertain = !!segment.text.trim() && !isPunctuationOnly(segment.text) && needsRecognitionReview(segment.confidence);
+    const alreadyHasChoices = recognitionCandidates.some((candidate) => candidate.position >= start && candidate.position < offset);
     if (uncertain && !alreadyHasChoices &&
       !intentTargets.some((target) => target.start < offset && target.end > start)) {
       intentTargets.push({ id: `intent:${start}`, start, end: offset, original: segment.text });
@@ -229,10 +231,19 @@ export async function reviewHandwriting(
   intentTargets.sort((a, b) => a.start - b.start || a.end - b.end);
   const unalignedText = segments.map((segment) => segment.text).join("") !== recognition.text;
   const ambiguous = coverage?.ambiguousOrdering || (intentTargets.length > 0 && unalignedText && (segments.length > 0 || coverage));
-  const shapeCandidates = ambiguous ? [] : findShapeCandidates(imageBuffer, spatial, characters, segments,
-    recognition.characterCandidates ?? [], intentTargets);
+  // An adapter's explicit uncertainty must not disappear when it has no
+  // per-character evidence to filter. Unknown scores remain unknown.
+  if (!segments.length && !recognitionCandidates.length && recognition.requiresVerification &&
+      needsRecognitionReview(recognition.confidence) && !isPunctuationOnly(recognition.text)) {
+    return { status: "LOW_CONFIDENCE", requiresVerification: true, requiresTextConfirmation: true,
+      recognizedText: recognition.text, ocrConfidence: recognition.confidence, ocrSegments: segments,
+      ocrCharacters: characters, characterCandidates: [], intentTargets: [], unresolvedRegions: [], revision,
+      clarificationMessage: "Please check or edit the recognised text before confirming it." };
+  }
+  const shapeCandidates = ambiguous || !RECOGNITION_POLICY.blockingShapeChecks ? [] : findShapeCandidates(imageBuffer, spatial, characters, segments,
+    recognitionCandidates, intentTargets);
   if (coverage || unexpectedLatin || intentTargets.length || shapeCandidates.length) {
-    const candidates = [...(recognition.characterCandidates ?? []), ...shapeCandidates].sort((a, b) => a.position - b.position).filter((candidate) =>
+    const candidates = [...recognitionCandidates, ...shapeCandidates].sort((a, b) => a.position - b.position).filter((candidate) =>
       !intentTargets.some((target) => candidate.position >= target.start && candidate.position < target.end));
     return {
       status: "LOW_CONFIDENCE", requiresVerification: true,
@@ -247,7 +258,7 @@ export async function reviewHandwriting(
     };
   }
 
-  if (recognition.status === "LOW_CONFIDENCE" || recognition.requiresVerification === true) {
+  if (recognitionCandidates.length) {
     return {
       ocrCharacters: characters,
       status: "LOW_CONFIDENCE",
@@ -255,7 +266,7 @@ export async function reviewHandwriting(
       ocrConfidence: recognition.confidence,
       ocrSegments: segments,
       requiresVerification: true,
-      characterCandidates: recognition.characterCandidates,
+      characterCandidates: recognitionCandidates,
       revision,
     };
   }

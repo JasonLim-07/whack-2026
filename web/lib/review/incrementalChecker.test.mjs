@@ -8,6 +8,7 @@ import { writingRegions } from "../handwriting/regions.mjs";
 import { sentenceRanges, scopedContextResult } from "./transcription.mjs";
 import { appendStroke, undoEdit, redoEdit } from "../handwriting/strokes.mjs";
 import { emptyMistakeHistory, mistakeReducer } from "./mistakes.mjs";
+import { recogniseFullStop } from "../handwriting/punctuation.mjs";
 
 const stroke = (id, column, text = "我", row = 0, uncertain = false) => ({ id, label: text, uncertain, width: 3,
   points: [{ x: column * 96 + 10, y: row * 96 + 10, timestamp: 10 },
@@ -134,6 +135,103 @@ test("punctuation context is limited to its neighbour and never overwrites that 
   assert.equal(result.ocrCharacters[0].start, 0);
   const noBoxes = scopedContextResult({ ...recognition(snapshot), ocrCharacters: [] }, snapshot, target);
   assert.equal(noBoxes.requiresTextConfirmation, true);
+  const knownContext = { ...target, context: { ...target.context, text: "我", confirmed: true } };
+  const literalSuffix = scopedContextResult({ ...recognition(snapshot), ocrCharacters: [] }, snapshot, knownContext);
+  assert.equal(literalSuffix.recognizedText, "。");
+  assert.equal(literalSuffix.requiresVerification, false);
+  assert.deepEqual(literalSuffix.ocrCharacters, []);
+  const changedContext = scopedContextResult({ ...recognition(snapshot), recognizedText: "你。", ocrCharacters: [] }, snapshot, knownContext);
+  assert.equal(changedContext.requiresTextConfirmation, true);
+});
+
+const fullStop = (column, circle = false, id = "stop") => ({ id, width: 3, label: circle ? "。" : ".",
+  points: circle ? Array.from({ length: 17 }, (_, index) => ({
+    x: column * 96 + 15 + 5 * Math.cos(index * Math.PI / 8), y: 76 + 5 * Math.sin(index * Math.PI / 8), timestamp: index,
+  })) : [{ x: column * 96 + 15, y: 76, timestamp: 30 }] });
+
+test("a baseline dot or Chinese full stop completes a sentence without another OCR call", async () => {
+  for (const circle of [false, true]) {
+    const h = harness(), body = sample("我有书"), punctuation = fullStop(3, circle);
+    h.checker.update({ revision: 1, strokes: body }); await h.checker.recogniseNow();
+    assert.equal(h.calls.grammar.length, 0);
+    h.checker.update({ revision: 2, strokes: [...body, punctuation] }); await h.checker.recogniseNow(); await settle();
+    const text = "我有书" + punctuation.label;
+    assert.equal(h.checker.getState().transcription.text, text);
+    assert.equal(h.calls.recognise.length, 3); // Only the three character regions were sent.
+    assert.deepEqual(h.calls.grammar.map((call) => call.text), [text]);
+    const region = h.checker.getState().regions.at(-1);
+    assert.equal(region.recognitionSource, "stroke_geometry");
+    assert.equal(region.review.ocrSegments[0].confidence, null);
+    assert.equal(h.checker.getState().transcription.characters.at(-1).bounds.x, punctuation.points[0].x - (circle ? 11.5 : 1.5));
+    h.checker.update({ revision: 3, strokes: body }); await settle();
+    assert.equal(h.checker.getState().sentences[0].complete, false);
+    h.checker.update({ revision: 4, strokes: [...body, punctuation] }); await h.checker.recogniseNow(); await settle();
+    assert.equal(h.calls.recognise.length, 3);
+    assert.equal(h.calls.grammar.length, 1); // Undo restoration reuses both caches.
+    h.checker.dispose();
+  }
+});
+
+test("a full stop beside unchanged ink in the same square retains the character and its mapping", async () => {
+  for (const circle of [false, true]) {
+    const h = harness(), body = stroke("body", 0, "书"); body.points[1].x = 55;
+    h.checker.update({ revision: 1, strokes: [body] }); await h.checker.recogniseNow();
+    const mark = fullStop(0, circle); mark.points = mark.points.map((point) => ({ ...point, x: point.x + 65 }));
+    h.checker.update({ revision: 2, strokes: [body, mark] }); await h.checker.recogniseNow(); await settle();
+    assert.equal(h.checker.getState().transcription.text, "书" + mark.label);
+    assert.equal(h.calls.recognise.length, 1);
+    assert.equal(h.calls.grammar.length, 1);
+    assert.equal(h.checker.getState().transcription.characters.length, 2);
+    assert.equal(h.checker.getState().regions[0].rawReview.recognizedText, "书");
+    h.checker.dispose();
+  }
+});
+
+test("a full stop omitted from an otherwise accepted OCR result still completes the sentence", async () => {
+  const h = harness({ recognise: (snapshot) => recognition({ ...snapshot, strokes: snapshot.strokes.slice(0, 1) }) });
+  const body = stroke("body", 0, "书"); body.points[1].x = 55;
+  const mark = fullStop(0); mark.points[0].x = 80;
+  h.checker.update({ revision: 1, strokes: [body, mark] }); await h.checker.recogniseNow(); await settle();
+  assert.equal(h.checker.getState().transcription.text, "书.");
+  assert.equal(h.calls.grammar[0].text, "书.");
+  assert.equal(h.checker.getState().regions[0].rawReview.recognizedText, "书");
+  h.checker.dispose();
+});
+
+test("punctuation never bypasses an uncertain character and confirmation starts grammar once", async () => {
+  const h = harness(), body = stroke("body", 0, "末", 0, true), mark = fullStop(1);
+  h.checker.update({ revision: 1, strokes: [body, mark] }); await h.checker.recogniseNow(); await settle();
+  assert.equal(h.calls.grammar.length, 0);
+  const region = h.checker.getState().regions[0];
+  h.checker.confirm(region.id, region.fingerprint, { 0: "末" }); await settle();
+  assert.equal(h.checker.getState().transcription.text, "末.");
+  assert.deepEqual(h.calls.grammar.map((call) => call.text), ["末."]);
+  h.checker.update({ revision: 2, strokes: [mark] }); await settle();
+  assert.equal(h.calls.grammar.length, 1); // A remaining punctuation mark is not a Mandarin sentence.
+  h.checker.dispose();
+});
+
+test("full-stop detection rejects commas, upper dots, open rings, large circles and numeric decimals", () => {
+  const body = stroke("body", 0, "书");
+  const previous = { ...incrementalRegions([body])[0], confirmed: true, text: "书" };
+  for (const mark of [
+    { ...fullStop(1), points: [{ x: 111, y: 76 }, { x: 108, y: 84 }] }, // comma
+    { ...fullStop(1), points: [{ x: 111, y: 76 }, { x: 120, y: 76 }] }, // dash
+    { ...fullStop(1), points: [{ x: 111, y: 20 }] },
+    { ...fullStop(1, true), points: fullStop(1, true).points.slice(0, 12) },
+    { ...fullStop(1, true), points: fullStop(1, true).points.map((p) => ({ ...p, x: 115 + (p.x - 111) * 3, y: 65 + (p.y - 76) * 3 })) },
+  ]) assert.equal(recogniseFullStop(incrementalRegions([mark])[0], [previous]), null);
+  const group = incrementalRegions([fullStop(1)])[0];
+  assert.equal(recogniseFullStop(group, [{ ...previous, text: "3" }]), null);
+  assert.equal(recogniseFullStop(group, [{ ...previous, confirmed: false }]), null);
+  const internal = fullStop(0); internal.points[0].x = 40;
+  const within = incrementalRegions([body, internal])[0];
+  assert.equal(recogniseFullStop(within, [], { ...previous, strokes: [body] }), null);
+  const narrowBody = structuredClone(body); narrowBody.points[1].x = 55;
+  const finalDot = fullStop(0); finalDot.points[0].x = 80;
+  const narrow = incrementalRegions([narrowBody, finalDot])[0];
+  assert.equal(recogniseFullStop(narrow, [], { ...previous, strokes: [narrowBody],
+    characters: [{ bounds: { x: 9, y: 9, width: 75, height: 72 } }] }), null);
 });
 
 test("sentence segmentation handles Chinese/English endings, decimal numbers, and unfinished tails", () => {

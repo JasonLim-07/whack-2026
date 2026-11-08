@@ -5,7 +5,7 @@ import { computeInkBoundingBox, renderGlyphPolylinesToRgba } from "../utils/ssim
 import { encodePngRgba } from "./pngUtils.js";
 import { findShapeCandidates } from "./reviewShape.js";
 import { POST } from "../../app/api/review/route.js";
-import { requestReview, getConfirmedText, requestConfirmedReview } from "../review/client.mjs";
+import { requestReview } from "../review/client.mjs";
 
 beforeEach((t) => {
   const previous = process.env;
@@ -57,20 +57,12 @@ test("similar synthetic shape proceeds through actual review endpoint to grammar
   assert.deepEqual(calls, ["ocr", "grammar"]);
 });
 
-test("structural mismatch pauses actual endpoint before grammar; explicit JSON confirmation succeeds", async (t) => {
+test("synthetic template differences do not block recognised handwriting or grammar", async (t) => {
   const value = fixture(true);
   const calls = providers(t, value);
-  const pending = await upload(value);
-  assert.deepEqual(calls, ["ocr"]);
-  assert.equal(pending.requiresVerification, true);
-  assert.equal(pending.recognizedText, "木");
-  const candidate = pending.characterCandidates[0];
-  assert.equal(candidate.visuallyUncertain, true);
-  assert.equal(candidate.confidence, 0.95); // Shape warning is not a confidence downgrade.
-  assert.equal(candidate.originalAttempt, "木");
-  assert.ok(candidate.options.length >= 2 && candidate.options.length <= 3);
-  assert.throws(() => getConfirmedText(pending, {}), /Choose/);
-  const result = await requestConfirmedReview(getConfirmedText(pending, { 0: "木" }), 4, undefined, send);
+  const result = await upload(value);
+  assert.equal(result.requiresVerification, undefined);
+  assert.equal(result.ocrSegments[0].confidence, 0.95);
   assert.equal(result.correctedText, "木");
   assert.deepEqual(calls, ["ocr", "grammar"]);
 });
@@ -101,11 +93,16 @@ test("existing candidate choices and low-confidence English-intent targets are n
   assert.deepEqual(check(value, [], [{ start: 0, end: 1 }]), []);
 });
 
-test("medium, low and unknown confidence retain their existing verification routes", async (t) => {
+test("moderate scores pass and genuinely low or unknown scores retain verification", async (t) => {
   for (const confidence of [0.75, 0.60, 0.40, null]) {
     const value = fixture(true);
     const calls = providers(t, value, confidence);
     const result = await upload(value);
+    if (confidence !== null && confidence >= 0.60) {
+      assert.deepEqual(calls, ["ocr", "grammar"]);
+      assert.equal(result.requiresVerification, undefined);
+      continue;
+    }
     assert.deepEqual(calls, ["ocr"]);
     assert.equal(result.requiresVerification, true);
     assert.ok(result.characterCandidates.every((candidate) => candidate.visuallyUncertain !== true));

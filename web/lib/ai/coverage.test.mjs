@@ -62,7 +62,8 @@ test("low confidence on a detected symbol stays separate from complete non-detec
   const value = recognition();
   value.status = "LOW_CONFIDENCE";
   value.requiresVerification = true;
-  value.characterCandidates = [{ position: 1, originalAttempt: "未", confidence: 0.75,
+  value.segments[1].confidence = 0.55;
+  value.characterCandidates = [{ position: 1, originalAttempt: "未", confidence: 0.55,
     options: [{ char: "未", reason: "Original" }, { char: "末", reason: "Suggestion" }] }];
   const result = await run(value);
   assert.equal(result.body.requiresVerification, true);
@@ -71,6 +72,7 @@ test("low confidence on a detected symbol stays separate from complete non-detec
   assert.equal(result.grammarCalls, 0);
   value.status = "UNREADABLE";
   value.segments[1].confidence = 0.4;
+  value.characterCandidates = [];
   const low = await run(value);
   assert.equal(low.status, 200);
   assert.deepEqual(low.body.intentTargets, [{ id: "intent:1", start: 1, end: 2, original: "未" }]);
@@ -118,7 +120,7 @@ test("punctuation and tiny unmatched marks are not declared definitely missing C
 test("legacy uploads without metadata keep working", async () => {
   const form = new FormData();
   form.set("image", new File([png], "legacy.png", { type: "image/png" }));
-  const result = await run(recognition("口", [{ text: "口", confidence: null }]),
+  const result = await run(recognition("口", [{ text: "口", confidence: 0.75 }]),
     new Request("http://localhost/api/review", { method: "POST", body: form }));
   assert.equal(result.grammarCalls, 1);
   assert.equal(checkWritingCoverage(undefined, []), null);

@@ -1,5 +1,8 @@
 import { incrementalRegions, recognitionContext, exportRecognitionRegion } from "../handwriting/incrementalRegions.mjs";
 import { GRID_SIZE } from "../handwriting/grid.mjs";
+import { exportBounds } from "../handwriting/export.mjs";
+import { recogniseFullStop } from "../handwriting/punctuation.mjs";
+import { validOcrCharacters } from "./locations.mjs";
 import { assembleTranscription, sentencesForRegions, worldCharacters, confirmedRegion, scopedContextResult } from "./transcription.mjs";
 import { getConfirmedText } from "./client.mjs";
 import { requestRegion, requestGrammar } from "./incrementalClient.mjs";
@@ -27,6 +30,28 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
     regions = regions.map((region) => region.status === "loading" ? { ...region, status: "pending" } : region);
   };
 
+  function snapshotMetadata(group, bounds, capturedRevision = revision) {
+    return { bounds, revision: capturedRevision, strokes: group.strokes, scope: { id: group.id,
+      bounds: { x: group.left * GRID_SIZE, y: group.top * GRID_SIZE,
+        width: (group.right - group.left + 1) * GRID_SIZE, height: (group.bottom - group.top + 1) * GRID_SIZE } } };
+  }
+
+  function acceptPunctuation(group, punctuation, original = null) {
+    const snapshot = snapshotMetadata(group, exportBounds(group.strokes));
+    const cropCharacters = punctuation.characters.map((entry) => ({ ...entry, bounds: entry.bounds
+      ? { ...entry.bounds, x: entry.bounds.x - snapshot.bounds.left, y: entry.bounds.y - snapshot.bounds.top } : null }));
+    const review = { status: "SUCCESS", requiresVerification: false, characterCandidates: [], recognizedText: punctuation.text,
+      ocrConfidence: null, ocrSegments: punctuation.segments, ocrCharacters: validOcrCharacters(cropCharacters, punctuation.text) ? cropCharacters : [],
+      revision, recognitionSource: "stroke_geometry" };
+    const next = { ...group, baseRegion: undefined, snapshot, review,
+      rawReview: original?.rawReview ?? group.baseRegion?.rawReview ?? review, text: punctuation.text,
+      characters: punctuation.characters, status: "ready", confirmed: true, error: null, recognitionSource: "stroke_geometry",
+      confidenceProvenance: { overall: "unavailable", segments: "stroke-geometry; existing provider scores retained" } };
+    remember(recognitionCache, group.fingerprint, next);
+    regions = regions.map((entry) => entry.id === group.id ? next : entry);
+    onObservation(review, snapshot, strokes);
+  }
+
   function rebuildSentences() {
     const next = sentencesForRegions(regions).map((sentence) => {
       const previous = sentences.find((entry) => entry.fingerprint === sentence.fingerprint);
@@ -43,7 +68,7 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
     if (editing || disposed) return;
     for (const sentence of sentences) {
       if (!sentences.some((entry) => entry.fingerprint === sentence.fingerprint && !entry.uncertain)) continue;
-      if (sentence.uncertain || (!manual && !sentence.complete) || grammarControllers.has(sentence.fingerprint) ||
+      if (!/\p{Script=Han}/u.test(sentence.text) || sentence.uncertain || (!manual && !sentence.complete) || grammarControllers.has(sentence.fingerprint) ||
         sentence.status === "ready" || (!manual && sentence.status === "error")) continue;
       const fingerprint = sentence.fingerprint, text = sentence.text, cacheKey = JSON.stringify([text, "gcse"]);
       const controller = new AbortController();
@@ -76,6 +101,11 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
       regions = regions.map((entry) => entry.id === group.id ? { ...entry, status: "loading", error: null } : entry);
       emit();
       try {
+        const localPunctuation = recogniseFullStop(group, regions);
+        if (localPunctuation) {
+          acceptPunctuation(group, localPunctuation);
+          rebuildSentences(); emit(); void runGrammar(); continue;
+        }
         const contextual = recognitionContext(group, regions);
         const snapshot = await exportRegion(contextual, revision);
         if (ticket !== generation || controller.signal.aborted) break;
@@ -87,16 +117,18 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
           clarificationMessage: "We could not read this square. Enter the Chinese text you intended, or retry recognition." };
         if (group.ambiguous) review = { ...review, requiresVerification: true, status: "LOW_CONFIDENCE", requiresTextConfirmation: true,
           characterCandidates: [], intentTargets: [], unresolvedRegions: [], clarificationMessage: "These strokes cross squares. Confirm the complete text in this region and its reading order." };
-        const next = { ...group, snapshot: { bounds: snapshot.bounds, revision: snapshot.revision, strokes: group.strokes,
-          scope: { id: group.id, bounds: { x: group.left * GRID_SIZE, y: group.top * GRID_SIZE,
-            width: (group.right - group.left + 1) * GRID_SIZE, height: (group.bottom - group.top + 1) * GRID_SIZE } } }, rawReview, review,
+        const next = { ...group, baseRegion: undefined, snapshot: snapshotMetadata(group, snapshot.bounds, snapshot.revision), rawReview, review,
           confidenceProvenance: { overall: review.ocrConfidence == null ? "unavailable" : "provider-reported",
             segments: review.ocrSegments.some((segment) => segment.confidence !== null) ? "provider-reported" : "unavailable" },
           text: contextual.context && review.requiresTextConfirmation ? "" : review.recognizedText,
           characters: worldCharacters(review, snapshot.bounds), confirmed: !review.requiresVerification, status: "ready", error: null };
-        remember(recognitionCache, group.fingerprint, next);
-        regions = regions.map((entry) => entry.id === group.id && entry.fingerprint === group.fingerprint ? next : entry);
-        onObservation(review, next.snapshot, strokes);
+        const omittedPunctuation = recogniseFullStop(next, regions, next);
+        if (omittedPunctuation) acceptPunctuation(next, omittedPunctuation, next);
+        else {
+          remember(recognitionCache, group.fingerprint, next);
+          regions = regions.map((entry) => entry.id === group.id && entry.fingerprint === group.fingerprint ? next : entry);
+          onObservation(review, next.snapshot, strokes);
+        }
       } catch (error) {
         if (ticket !== generation || controller.signal.aborted || disposed) break;
         regions = regions.map((entry) => entry.id === group.id ? { ...entry, status: "error", error: error.message || "Recognition failed. Please retry." } : entry);
@@ -125,7 +157,8 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
             if (!previous) onObservation(restored.review, restored.snapshot, strokes);
             return restored;
           }
-          return { ...group, status: "pending", text: "", characters: [], confirmed: false };
+          return { ...group, baseRegion: regions.find((entry) => entry.id === group.id && entry.confirmed && entry.status === "ready"),
+            status: "pending", text: "", characters: [], confirmed: false };
         });
       } catch (error) { regions = []; groupError = error.message; }
       rebuildSentences(); emit();
@@ -145,6 +178,11 @@ export function createIncrementalChecker({ recognise = requestRegion, grammar = 
       onConfirmation(region.review, selections, intentSuggestions, text);
       regions = regions.map((entry) => entry.id === id ? next : entry);
       remember(recognitionCache, fingerprint, next);
+      for (const entry of regions) {
+        if (entry.status !== "ready" || entry.confirmed) continue;
+        const punctuation = recogniseFullStop(entry, regions);
+        if (punctuation) acceptPunctuation(entry, punctuation, entry);
+      }
       rebuildSentences(); emit(); void runGrammar();
     },
     checkGrammar: () => runGrammar(true),

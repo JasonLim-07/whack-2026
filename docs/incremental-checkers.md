@@ -18,9 +18,28 @@ Grid-crossing strokes merge intersecting occupied cell rectangles. Such groups
 require explicit text/order confirmation. Tiny marks may include only their
 immediately preceding square as recognition context. Provider boxes determine
 which returned characters belong to the target square; the neighbour's stored
-transcription is never overwritten. Without sufficient boxes, the learner must
-enter the target text explicitly. This is grid-guided recognition, not a general
+transcription is never overwritten. An exact stored-prefix match followed only
+by reported punctuation can be separated without inventing boxes. Other results
+without sufficient boxes require explicit target-text confirmation. This is grid-guided recognition, not a general
 freeform document segmentation system.
+
+The application review cutoff is now **below 0.60**, rather than below 0.90.
+`web/lib/ai/recognitionPolicy.mjs` centralises this adjustable policy. Scores are
+provider reports, not accuracy probabilities; original values remain unchanged.
+Unknown character scores and fallback-model transcriptions still require
+confirmation. Bundled synthetic-template mismatches no longer generate blocking
+warnings by default: normal handwriting variation is not evidence of a mistake.
+This policy applies to the incremental and legacy review endpoints; the raw OCR
+adapter's tiers are retained for compatibility.
+
+Small baseline dots and closed circles after recognised/confirmed Han text have
+a conservative local stroke-geometry fallback. It supports the next square or a
+clearly separated mark at the lower right of the same square, including a mark
+omitted by OCR. Existing character mappings and literal provider text are retained;
+the added mark is labelled `stroke_geometry` with confidence `null`. Commas,
+dashes, open/large rings, upper dots, marks inside a provider character box, and
+marks after digits are excluded. This fallback is grid-guided and cannot resolve
+every ambiguous mark; unclear punctuation can still be confirmed manually.
 
 Grammar operates on stored text. Completed sentences ending in `。！？.!?` are
 checked automatically once their transcription is reliable or confirmed. Decimal
@@ -40,7 +59,7 @@ not mark unrelated handwriting as deleted.
 ## APIs and reuse
 
 - `POST /api/recognition`: bounded multipart PNG region, optional existing spatial
-  metadata, and revision. Reuses OCR, coverage checks and limited shape advisories;
+  metadata, and revision. Reuses OCR and coverage checks with the gentler review policy;
   never invokes grammar. Boxes remain crop-relative on the wire.
 - `POST /api/grammar`: existing text JSON shape (`text`, `level`, `revision`), with
   `gcse` supplied by the client. Returns validated grammar with Unicode code-point
@@ -135,9 +154,19 @@ model accuracy; record real-provider and browser checks separately.
 
 ### Verification record
 
-- 215 automated tests passed, covering the new coordinator, HTTP endpoints,
+- 235 automated tests passed, covering the new coordinator, HTTP endpoints,
   feedback components and existing recognition/grammar/whiteboard behaviour.
 - ESLint and the production build passed.
+- The gentler-policy regression checks cover the 0.60 boundary, moderate scores,
+  unknown scores, unchanged provider values, and non-blocking template differences.
+- Full-stop regression checks cover dots/circles in adjacent and shared squares,
+  OCR omission, context without boxes, uncertainty confirmation, rejected commas
+  and character dots, grammar deduplication, removal, and undo restoration.
+- A live HTTP/coordinator check using synthetic `我有书` strokes returned genuine
+  OCR scores of 0.96, 0.86, and 0.96 without confirmation prompts. Adding a baseline
+  dot required no fourth OCR request and triggered exactly one successful grammar
+  request for `我有书.`. The provider returned no grammar issues. This is a
+  functional regression check, not an accuracy study of real handwriting.
 - Live production recognition returned HTTP 200 for the bundled third CASIA line,
   with nine located characters and provider-reported segment scores. The fixture
   has a JPEG signature despite its `.png` name, so it was converted to PNG in

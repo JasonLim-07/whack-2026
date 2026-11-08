@@ -240,23 +240,20 @@ test("invalid OCR confidence and segment schemas return 502", async () => {
   }
 });
 
-test("original OCR text and real segment confidence are preserved without deriving an overall score", async () => {
+test("unknown segment confidence retains literal text and scores and asks for confirmation", async () => {
   const text = "  我是学生。\n";
   const segments = [{ text: "我是", confidence: 0.8 }, { text: "学生。", confidence: null }];
   const response = await handleReview(request(), dependencies({
     recogniseHandwriting: async () => ({ text, confidence: null, segments }),
-    analyseGrammar: async (received, options) => {
-      assert.equal(received, text);
-      assert.deepEqual(options, { level: "beginner" });
-      return { correctedText: "我是学生。", issues: [] };
-    },
+    analyseGrammar: async () => { assert.fail("Unknown transcription must be confirmed first"); },
   }));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    ocrCharacters: [],
-    recognizedText: text, ocrConfidence: null, ocrSegments: segments,
-    correctedText: text, issues: [], revision: null,
-  });
+  const result = await response.json();
+  assert.equal(result.recognizedText, text);
+  assert.equal(result.ocrConfidence, null);
+  assert.deepEqual(result.ocrSegments, segments);
+  assert.equal(result.requiresTextConfirmation, true);
+  assert.equal(result.correctedText, undefined);
 });
 
 test("provider-reported overall confidence is preserved", async () => {
@@ -449,8 +446,8 @@ test("actual POST routes high, medium, low and unknown confidence before grammar
   // Select the real Cloud Vision code path; only its transport is mocked.
   process.env.OCR_PROVIDER = "vision";
   for (const [confidence, status, grammarRuns] of [
-    [0.95, 200, true], [0.90, 200, true], [0.899, 200, false],
-    [0.75, 200, false], [0.60, 200, false], [0.599, 200, false],
+    [0.95, 200, true], [0.90, 200, true], [0.899, 200, true],
+    [0.75, 200, true], [0.60, 200, true], [0.599, 200, false],
     [0.40, 200, false], [null, 200, false], [undefined, 200, false],
   ]) {
     // Undefined must reach the provider JSON as a missing score.

@@ -70,6 +70,11 @@ export function scopedContextResult(review, snapshot, target) {
   const suffixStart = targetCharacters[0]?.start;
   const suffix = suffixStart !== undefined && targetCharacters.every((entry, index) => index === 0 || entry.start === targetCharacters[index - 1].end) &&
     targetCharacters.at(-1).end === Array.from(review.recognizedText).length;
+  if (!suffix && target.context.text && review.recognizedText.startsWith(target.context.text)) {
+    const ending = Array.from(review.recognizedText).slice(Array.from(target.context.text).length).join("");
+    if (/^[。！？.!?]+$/u.test(ending)) return { ...review, recognizedText: ending, ocrCharacters: [], ocrSegments: [],
+      requiresVerification: false, requiresTextConfirmation: false, status: "SUCCESS", characterCandidates: [], intentTargets: [], unresolvedRegions: [] };
+  }
   if (!suffix) return { ...review, requiresVerification: true, status: "LOW_CONFIDENCE", requiresTextConfirmation: true,
     characterCandidates: [], intentTargets: [], unresolvedRegions: [], ocrCharacters: [],
     clarificationMessage: "Enter only the text in the new or changed square; the preceding square was context." };
