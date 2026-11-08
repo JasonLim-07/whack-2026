@@ -1,6 +1,9 @@
 ﻿import { screenToWorld } from "./viewport.mjs";
 
-export const GRID_SIZE = 96;
+import { GRID_SIZE } from "./grid.mjs";
+import { cellKey, warningOpacity } from "./boundaries.mjs";
+
+export { GRID_SIZE } from "./grid.mjs";
 
 export function visibleGrid(viewport, width, height) {
   const start = screenToWorld({ x: 0, y: 0 }, viewport);
@@ -63,4 +66,39 @@ export function renderWhiteboard(ctx, size, viewport, strokes, activeStroke) {
   ctx.stroke();
   for (const stroke of strokes) drawStroke(ctx, stroke);
   if (activeStroke) drawStroke(ctx, activeStroke);
+}
+
+// Advisory overlay only: separate from permanent ink, sharing its world transform.
+export function renderBoundaryWarnings(ctx, size, viewport, cells, warnings, now) {
+  ctx.save();
+  ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
+  ctx.translate(viewport.offsetX, viewport.offsetY);
+  ctx.scale(viewport.zoom, viewport.zoom);
+  ctx.strokeStyle = "#d97706";
+  ctx.fillStyle = "#d97706";
+  ctx.lineWidth = 2 / viewport.zoom;
+  ctx.lineJoin = "round";
+  const outlines = new Map();
+  for (const warning of warnings.values()) {
+    const key = cellKey(warning.cell);
+    const opacity = warningOpacity(warning.startedAt, now);
+    if (!outlines.has(key) || outlines.get(key).opacity < opacity) outlines.set(key, { cell: warning.cell, opacity });
+  }
+  for (const { cell, opacity } of outlines.values()) {
+    ctx.globalAlpha = opacity * 0.7;
+    ctx.strokeRect(cell.column * GRID_SIZE, cell.row * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+  }
+  ctx.globalAlpha = 0.8;
+  const unit = 1 / viewport.zoom;
+  for (const cell of cells) {
+    const x = (cell.column + 1) * GRID_SIZE - 9 * unit;
+    const y = cell.row * GRID_SIZE + 9 * unit;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 4 * unit);
+    ctx.lineTo(x + 4 * unit, y + 3 * unit);
+    ctx.lineTo(x - 4 * unit, y + 3 * unit);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
 }

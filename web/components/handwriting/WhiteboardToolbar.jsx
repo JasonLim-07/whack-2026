@@ -5,19 +5,20 @@ export default function WhiteboardToolbar({ ui, onTool, onZoom, onUndo, onClear 
   return (
     <div role="group" aria-label="Whiteboard controls" className="flex flex-wrap items-center gap-2">
       <div role="group" aria-label="Drawing tools" className="flex gap-1">
-        {["pen", "hand"].map((tool) => (
+        {["pen", "eraser", "hand"].map((tool) => (
           <button
             key={tool}
             type="button"
             aria-pressed={ui.tool === tool}
+            title={tool === "eraser" ? "Erase whole strokes (undoable)" : undefined}
             onClick={() => onTool(tool)}
             className={`${buttonClass} ${ui.tool === tool ? "bg-neutral-900 text-white hover:bg-neutral-800" : "bg-white text-neutral-700"}`}
           >
-            {tool === "pen" ? "Pen" : "Hand"}
+            {tool === "pen" ? "Pen" : tool === "eraser" ? "Eraser" : "Hand"}
           </button>
         ))}
       </div>
-      <button type="button" className={buttonClass} disabled={!ui.count} onClick={onUndo} title="Undo (Ctrl/Cmd+Z)">Undo</button>
+      <button type="button" className={buttonClass} disabled={!ui.canUndo} onClick={onUndo} title="Undo (Ctrl/Cmd+Z)">Undo</button>
       <button type="button" className={buttonClass} disabled={!ui.count} onClick={onClear}>Clear</button>
       <div className="ml-auto flex items-center gap-3">
         <label className="flex items-center gap-2 text-sm text-neutral-600">

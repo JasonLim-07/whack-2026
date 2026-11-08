@@ -8,7 +8,7 @@ export default function HandwritingCanvas({ disabled = false, onChange }) {
   const helpId = useId();
   const { rootRef, canvasRef, ui, selectTool, setZoom, undo, clear } = useWhiteboard({ disabled, onChange });
   const navigating = ui.tool === "hand" || ui.zoom < 1 || ui.space;
-  const cursor = ui.panning ? "grabbing" : navigating ? "grab" : disabled ? "not-allowed" : "crosshair";
+  const cursor = ui.panning ? "grabbing" : navigating ? "grab" : disabled ? "not-allowed" : ui.tool === "eraser" ? "cell" : "crosshair";
 
   return (
     <section ref={rootRef} aria-label="Handwriting whiteboard" className="flex min-h-0 flex-1 flex-col gap-3">
@@ -26,9 +26,9 @@ export default function HandwritingCanvas({ disabled = false, onChange }) {
         </canvas>
       </div>
       <p id={helpId} className="text-xs leading-5 text-neutral-500">
-        <span role="status">{disabled ? "Drawing is disabled. " : ui.zoom < 1 ? "Return to 100% to write. " : "100% is the recommended writing scale. "}</span>
+        <span role="status">{disabled ? "Drawing is disabled. " : ui.zoom < 1 ? "Return to 100% to write or erase. " : "100% is the recommended writing scale. "}</span>
         Hold Space to pan. Scroll to move; Ctrl/Cmd + scroll to zoom. Ctrl/Cmd + Z to undo.
-        {" "}Writing stays in this tab only.
+        {" "}Eraser removes whole strokes. Amber markers flag strokes crossing their starting cell, not Mandarin mistakes. Writing stays in this tab only.
       </p>
     </section>
   );

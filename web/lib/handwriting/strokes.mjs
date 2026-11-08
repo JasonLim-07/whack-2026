@@ -10,3 +10,15 @@ export function undoStroke(strokes) {
 export function clearStrokes(strokes) {
   return strokes.length ? [] : strokes;
 }
+
+// Each completed pen stroke or eraser drag is one undoable edit.
+// Snapshots share immutable completed stroke objects; no bitmap history is stored.
+export function commitEdit(history, before, after) {
+  return before === after ? history : [...history, before];
+}
+
+export function undoEdit(history, strokes) {
+  return history.length
+    ? { history: history.slice(0, -1), strokes: history.at(-1) }
+    : { history, strokes };
+}

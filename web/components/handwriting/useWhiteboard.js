@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { screenToWorld, wheelDelta, zoomAt } from "@/lib/handwriting/viewport.mjs";
-import { renderWhiteboard } from "@/lib/handwriting/render.mjs";
-import { appendStroke, clearStrokes, undoStroke } from "@/lib/handwriting/strokes.mjs";
+import { renderBoundaryWarnings, renderWhiteboard } from "@/lib/handwriting/render.mjs";
+import { appendStroke, clearStrokes, commitEdit, undoEdit } from "@/lib/handwriting/strokes.mjs";
+
+import { cellAt, flagBoundaryCrossing, invalidCells, pruneWarnings } from "@/lib/handwriting/boundaries.mjs";
+import { eraseStrokes } from "@/lib/handwriting/eraser.mjs";
 
 export default function useWhiteboard({ disabled, onChange }) {
   const rootRef = useRef(null);
@@ -11,10 +14,12 @@ export default function useWhiteboard({ disabled, onChange }) {
   const controllerRef = useRef(null);
   const optionsRef = useRef({ disabled, onChange });
   const strokesRef = useRef([]);
+  const historyRef = useRef([]);
+  const warningsRef = useRef(new Map());
   const viewportRef = useRef({ offsetX: 0, offsetY: 0, zoom: 1 });
   const gestureRef = useRef(null);
   const revisionRef = useRef(0);
-  const [ui, setUi] = useState({ tool: "pen", zoom: 1, count: 0, panning: false, space: false });
+  const [ui, setUi] = useState({ tool: "pen", zoom: 1, count: 0, canUndo: false, panning: false, space: false });
 
   useEffect(() => {
     optionsRef.current = { disabled, onChange };
@@ -35,7 +40,14 @@ export default function useWhiteboard({ disabled, onChange }) {
       if (frame !== null) return;
       frame = requestAnimationFrame(() => {
         frame = null;
-        renderWhiteboard(ctx, size, viewportRef.current, strokesRef.current, gestureRef.current?.stroke);
+        const activeStroke = gestureRef.current?.stroke;
+        const now = performance.now();
+        pruneWarnings(warningsRef.current, strokesRef.current, activeStroke, now);
+        renderWhiteboard(ctx, size, viewportRef.current, strokesRef.current, activeStroke);
+        renderBoundaryWarnings(ctx, size, viewportRef.current,
+          invalidCells(strokesRef.current, activeStroke), warningsRef.current, now);
+        // Continue only while a transient outline is fading, including its final clean frame.
+        if (warningsRef.current.size) redraw();
       });
     }
 
@@ -69,13 +81,15 @@ export default function useWhiteboard({ disabled, onChange }) {
     }
 
     function cancel() {
+      const gesture = gestureRef.current;
+      if (gesture?.mode === "erase") strokesRef.current = gesture.before;
       releaseGesture();
       redraw();
     }
 
     function notify() {
       revisionRef.current += 1;
-      setUi((previous) => ({ ...previous, count: strokesRef.current.length }));
+      setUi((previous) => ({ ...previous, count: strokesRef.current.length, canUndo: historyRef.current.length > 0 }));
       redraw();
       optionsRef.current.onChange?.({ revision: revisionRef.current, hasInk: strokesRef.current.length > 0 });
     }
@@ -87,6 +101,9 @@ export default function useWhiteboard({ disabled, onChange }) {
         const point = screenToWorld(localPoint(sample), viewportRef.current);
         const last = gesture.stroke.points.at(-1);
         if (point.x !== last.x || point.y !== last.y) gesture.stroke.points.push(point);
+        if (flagBoundaryCrossing(gesture.stroke, point)) {
+          warningsRef.current.set(gesture.stroke.id, { cell: gesture.stroke.originCell, startedAt: performance.now() });
+        }
       }
     }
 
@@ -97,14 +114,24 @@ export default function useWhiteboard({ disabled, onChange }) {
       event.preventDefault();
       canvas.focus({ preventScroll: true });
       const point = localPoint(event);
-      const gesture = { id: event.pointerId, mode: pan ? "pan" : "draw", last: point };
-      if (!pan) {
+      const world = screenToWorld(point, viewportRef.current);
+      const gesture = {
+        id: event.pointerId, mode: pan ? "pan" : tool === "eraser" ? "erase" : "draw",
+        last: point, before: strokesRef.current,
+      };
+      if (gesture.mode === "draw") {
         gesture.stroke = {
           id: crypto.randomUUID(),
-          points: [screenToWorld(point, viewportRef.current)],
+          points: [world],
+          originCell: cellAt(world),
+          boundaryStatus: "within_bounds",
           width: 3,
           color: "#171717",
         };
+      }
+      if (gesture.mode === "erase") {
+        gesture.lastWorld = world;
+        strokesRef.current = eraseStrokes(strokesRef.current, world, world);
       }
       gestureRef.current = gesture;
       canvas.setPointerCapture(event.pointerId);
@@ -117,6 +144,13 @@ export default function useWhiteboard({ disabled, onChange }) {
       if (!gesture || gesture.id !== event.pointerId) return;
       if (gesture.mode === "draw") {
         addPoints(event, gesture);
+      } else if (gesture.mode === "erase") {
+        const samples = event.getCoalescedEvents?.() || [];
+        for (const sample of [...samples, event]) {
+          const world = screenToWorld(localPoint(sample), viewportRef.current);
+          strokesRef.current = eraseStrokes(strokesRef.current, gesture.lastWorld, world);
+          gesture.lastWorld = world;
+        }
       } else {
         const point = localPoint(event);
         viewportRef.current = {
@@ -136,6 +170,9 @@ export default function useWhiteboard({ disabled, onChange }) {
       releaseGesture();
       if (gesture.stroke) {
         strokesRef.current = appendStroke(strokesRef.current, gesture.stroke);
+      }
+      if (strokesRef.current !== gesture.before) {
+        historyRef.current = commitEdit(historyRef.current, gesture.before, strokesRef.current);
         notify();
       } else redraw();
     }
@@ -168,8 +205,10 @@ export default function useWhiteboard({ disabled, onChange }) {
 
     function undo() {
       cancel();
-      if (!strokesRef.current.length) return;
-      strokesRef.current = undoStroke(strokesRef.current);
+      if (!historyRef.current.length) return;
+      const restored = undoEdit(historyRef.current, strokesRef.current);
+      historyRef.current = restored.history;
+      strokesRef.current = restored.strokes;
       notify();
     }
 
@@ -177,6 +216,8 @@ export default function useWhiteboard({ disabled, onChange }) {
       cancel();
       if (!strokesRef.current.length || !window.confirm("Clear all handwriting? This cannot be undone.")) return;
       strokesRef.current = clearStrokes(strokesRef.current);
+      historyRef.current = [];
+      warningsRef.current.clear();
       notify();
     }
 
