@@ -60,3 +60,18 @@ test("export reports encoding, context, MIME and size errors", async () => {
   const large = new Blob([new Uint8Array(MAX_IMAGE_BYTES + 1)], { type: "image/png" });
   await assert.rejects(exportStrokes([ink()], () => mockCanvas(large).canvas), /5 MB/);
 });
+
+test("snapshot captures export bounds and revision together before PNG encoding completes", async () => {
+  const { exportStrokeSnapshot } = await import("./export.mjs");
+  const completed = [ink()];
+  const { canvas } = mockCanvas();
+  let finish;
+  canvas.toBlob = (callback) => { finish = callback; };
+  const pending = exportStrokeSnapshot(completed, 7, () => canvas);
+  completed.push(ink([{ x: 3000, y: 1000 }]));
+  finish(new Blob(["png"], { type: "image/png" }));
+  const snapshot = await pending;
+  assert.equal(snapshot.revision, 7);
+  assert.deepEqual(snapshot.bounds, { left: -36, top: -46, width: 162, height: 122 });
+  assert.equal(snapshot.image.type, "image/png");
+});

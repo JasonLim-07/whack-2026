@@ -41,7 +41,7 @@ npm start
 The home page connects the handwriting canvas to `POST /api/review`. Write a short
 Mandarin sample and press **Review**. All remaining handwriting, including offscreen
 strokes, is exported as a cropped PNG. The grid and amber boundary warnings are
-excluded. Editing pauses during review; pan and zoom remain available.
+excluded. Editing remains available during review; starting an edit cancels outdated feedback. Pan and zoom remain available.
 
 **Writing Review** opens as a right sidebar on desktop and a bottom drawer on
 smaller screens. Closing it preserves feedback and handwriting. Writing changes
@@ -72,5 +72,11 @@ node --test lib/handwriting/*.test.mjs lib/review/*.test.mjs lib/ai/*.test.mjs l
 
 Manual checks: review correct and incorrect sentences, collapse/reopen the panel,
 review writing after panning it offscreen, check mobile layout, retry failures,
-and verify eraser/undo/clear are locked during requests and usable afterward.
+and verify writing/erasing during a request cancels outdated results. Check the fading boundary and zoom notices, the 100% return-to-writing button, and linked grammar highlights.
 Exports above 4096 pixels per side or 5 MiB are rejected without changing ink.
+
+
+Grammar integration now requires `start`/`end` code-point ranges on issues and
+preserves OCR character boxes as `ocrCharacters`. See `docs/SPEC.md` for the shared
+contract. Card selection highlights the corresponding typed text and located ink;
+missing geometry never creates an inferred cell highlight.

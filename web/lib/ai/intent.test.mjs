@@ -91,7 +91,7 @@ test("English intent to explicit Chinese selection to JSON grammar review preser
     recogniseHandwriting: async () => { throw new Error("OCR must not run"); },
     analyseGrammar: async (input) => {
       assert.equal(input, "我有三书。");
-      return { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
+      return { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
     },
   }));
   assert.equal(review.correctedText, "我有三本书。");

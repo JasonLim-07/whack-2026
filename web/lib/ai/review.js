@@ -1,3 +1,4 @@
+import { validOcrCharacters } from "../review/locations.mjs";
 import { Buffer } from "node:buffer";
 import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
 import { checkWritingCoverage, validBounds, validSpatialMetadata } from "./coverage.mjs";
@@ -139,7 +140,7 @@ function validConfidence(value) {
   return value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1);
 }
 
-async function reviewText(text, level, revision, grammar, confidence = null, segments = []) {
+async function reviewText(text, level, revision, grammar, confidence = null, segments = [], characters = []) {
   let analysis;
   try {
     analysis = validateGrammarResponse(await grammar(text, { level }), text);
@@ -147,6 +148,7 @@ async function reviewText(text, level, revision, grammar, confidence = null, seg
     throw providerError(error, "GRAMMAR");
   }
   return {
+    ocrCharacters: characters,
     recognizedText: text,
     ocrConfidence: confidence,
     ocrSegments: segments,
@@ -186,6 +188,11 @@ export async function reviewHandwriting(
     return { text: segment.text, confidence: segment.confidence, ...(segment.bounds ? { bounds: segment.bounds } : {}) };
   });
 
+  const characters = recognition.characters ?? [];
+  if (!validOcrCharacters(characters, recognition.text)) {
+    throw new ReviewError(502, "INVALID_OCR_RESPONSE", "Recognition provider returned invalid character locations.");
+  }
+
   const coverage = checkWritingCoverage(spatial, segments);
   const unexpectedLatin = hasLatinText(recognition.text);
   const intentTargets = [];
@@ -216,7 +223,7 @@ export async function reviewHandwriting(
     return {
       status: "LOW_CONFIDENCE", requiresVerification: true,
       ...(ambiguous ? { requiresTextConfirmation: true } : {}),
-      recognizedText: recognition.text, ocrConfidence: recognition.confidence, ocrSegments: segments,
+      recognizedText: recognition.text, ocrConfidence: recognition.confidence, ocrSegments: segments, ocrCharacters: characters,
       characterCandidates: ambiguous ? [] : candidates,
       intentTargets: ambiguous ? [] : intentTargets,
       unresolvedRegions: coverage?.unresolvedRegions ?? [],
@@ -228,6 +235,7 @@ export async function reviewHandwriting(
 
   if (recognition.status === "LOW_CONFIDENCE" || recognition.requiresVerification === true) {
     return {
+      ocrCharacters: characters,
       status: "LOW_CONFIDENCE",
       recognizedText: recognition.text,
       ocrConfidence: recognition.confidence,
@@ -237,7 +245,7 @@ export async function reviewHandwriting(
       revision,
     };
   }
-  return reviewText(recognition.text, level, revision, grammar, recognition.confidence, segments);
+  return reviewText(recognition.text, level, revision, grammar, recognition.confidence, segments, characters);
 }
 
 /** Shared request handler; the normal route supplies no mock OCR dependency. */

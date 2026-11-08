@@ -68,8 +68,20 @@ test("suggestion loading and changed-drawing states hide obsolete confirmation c
 
 test("confirmed review displays existing grammar feedback", () => {
   const result = render({ review: { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
-    issues: [{ id: "one", type: "grammar", original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] } });
+    issues: [{ id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] } });
   assert.match(result, /我有三本书。/);
   assert.match(result, /Use 本 for books/);
   assert.doesNotMatch(result, /Suggest Chinese|type="radio"/);
+});
+
+test("grammar cards and typed highlights retain selection alongside verification controls", () => {
+  const review = { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
+    issues: [{ id: "one", type: "grammar", start: 3, end: 3, original: "", replacement: "本", explanation: "Use 本 for books." }] };
+  const selected = render({ review, selectedIssueId: "one" });
+  assert.match(selected, /aria-pressed="true"/);
+  assert.match(selected, /aria-label="Suggested insertion"/);
+  assert.match(selected, /bg-blue-200/);
+  const loading = render({ review: intent, loading: true, suggesting: true });
+  assert.match(loading, /Finding Chinese suggestions/);
+  assert.match(loading, /You can keep writing/);
 });

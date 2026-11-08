@@ -2,6 +2,7 @@
 
 import { getConfirmedText } from "@/lib/review/client.mjs";
 import { isLatinOnlyText } from "@/lib/review/text.mjs";
+import { textHighlights } from "@/lib/review/locations.mjs";
 
 const typeLabels = { grammar: "Grammar", word_choice: "Word choice", character: "Character usage" };
 
@@ -85,7 +86,8 @@ function CharacterVerification({ review, selections, onSelectCharacter, onConfir
 }
 
 export default function FeedbackPanel({ review, loading, error, onReview, stale = false, canReview = true,
-  selections = {}, onSelectCharacter, onConfirm, confirmedText = "", onEditText, suggesting = false, intentDescriptions = {}, intentSuggestions = {}, onDescribe, onSuggest }) {
+  selections = {}, onSelectCharacter, onConfirm, confirmedText = "", onEditText, suggesting = false,
+  intentDescriptions = {}, intentSuggestions = {}, onDescribe, onSuggest, selectedIssueId = null, onSelectIssue }) {
   const verifying = review?.requiresVerification === true;
   return (
     <div className="space-y-6 text-sm leading-6" aria-busy={loading}>
@@ -97,7 +99,7 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
       )}
       {loading ? (
         <div role="status" className="rounded-lg bg-neutral-50 p-4 text-neutral-600">
-          {suggesting ? "Finding Chinese suggestions…" : verifying ? "Reviewing your confirmed text…" : "Reviewing your handwriting… Recognition and grammar analysis may take a moment."} You can still pan and zoom.
+          {suggesting ? "Finding Chinese suggestions…" : verifying ? "Reviewing your confirmed text…" : "Reviewing your handwriting… Recognition and grammar analysis may take a moment."} You can keep writing. Changes cancel this review.
         </div>
       ) : error && !verifying ? null : stale ? (
         <p role="status" className="text-neutral-600">Writing changed. Review again to update feedback.</p>
@@ -107,7 +109,15 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
         <>
           <section aria-labelledby="recognized-text-heading">
             <h3 id="recognized-text-heading" className="mb-2 font-medium text-neutral-800">Recognised Text</h3>
-            <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{review.recognizedText}</p>
+            <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{textHighlights(review.recognizedText, review.issues ?? []).map((run) => run.issueIds.length ? (
+              <mark key={run.key} aria-label={run.insertion ? "Suggested insertion" : undefined}
+                className={`rounded-sm ${run.issueIds.includes(selectedIssueId) ? "bg-blue-200 text-blue-950 ring-1 ring-blue-400" : "bg-blue-100 text-blue-950"}`}>
+                {run.text}
+              </mark>
+            ) : <span key={run.key}>{run.text}</span>)}</p>
+            <p className="mt-2 text-xs text-neutral-500">
+              {review.ocrConfidence == null ? "Confidence unavailable." : `OCR confidence: ${(review.ocrConfidence * 100).toFixed(1)}% (provider-reported).`}
+            </p>
           </section>
           {verifying ? review.requiresTextConfirmation
             ? <TextVerification value={confirmedText} onEdit={onEditText} onConfirm={onConfirm} />
@@ -124,14 +134,17 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
             ) : (
               <ul className="space-y-3">
                 {review.issues.map((issue) => (
-                  <li key={issue.id} className="rounded-lg border border-blue-100 bg-blue-50/50 p-3">
-                    <p className="mb-2 text-xs font-medium text-blue-800">{typeLabels[issue.type]}</p>
-                    <div className="mb-2 flex flex-wrap items-baseline gap-2 text-base">
+                  <li key={issue.id}>
+                    <button type="button" onClick={() => onSelectIssue?.(issue.id)} aria-pressed={selectedIssueId === issue.id}
+                      className={`w-full rounded-lg border p-3 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 ${selectedIssueId === issue.id ? "border-blue-400 bg-blue-100/70" : "border-blue-100 bg-blue-50/50"}`}>
+                    <span className="mb-2 block text-xs font-medium text-blue-800">{typeLabels[issue.type]}</span>
+                    <span className="mb-2 flex flex-wrap items-baseline gap-2 text-base">
                       <span lang="zh-Hans" className="break-all rounded bg-white px-1.5 text-neutral-600"><span className="sr-only">Original: </span>{issue.original || "(insertion)"}</span>
                       <span aria-hidden="true" className="text-neutral-400">→</span>
                       <span lang={issue.replacement ? "zh-Hans" : undefined} className="break-all font-medium text-blue-900"><span className="sr-only">Suggestion: </span>{issue.replacement || "Remove this text"}</span>
-                    </div>
-                    <p className="break-words text-neutral-700">{issue.explanation}</p>
+                    </span>
+                    <span className="block break-words text-neutral-700">{issue.explanation}</span>
+                    </button>
                   </li>
                 ))}
               </ul>

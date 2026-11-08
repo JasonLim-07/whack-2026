@@ -157,7 +157,7 @@ test("clarification followed by frontend JSON confirmation bypasses OCR and prod
     analyseGrammar: async (value) => {
       calls++;
       assert.equal(value, "我有三书。");
-      return { correctedText: "我有三本书。", issues: [{ id: "measure", type: "grammar", original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
+      return { correctedText: "我有三本书。", issues: [{ id: "measure", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
     },
   }));
   assert.equal(result.correctedText, "我有三本书。");
@@ -193,6 +193,7 @@ test("actual POST retains raw provider boxes and stops before Gemini on spatial 
   assert.equal(body.requiresTextConfirmation, undefined);
   assert.deepEqual(body.intentTargets, [{ id: "missing:0:1", start: 1, end: 1, original: "" }]);
   assert.deepEqual(body.ocrSegments[0].bounds, left);
+  assert.deepEqual(body.ocrCharacters, [{ text: "口", start: 0, end: 1, bounds: left }]);
   assert.equal(body.unresolvedRegions[0].id, "0:1");
   assert.equal(calls, 1);
 });

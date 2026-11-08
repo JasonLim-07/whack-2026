@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
+import { handwritingHighlights } from "@/lib/review/locations.mjs";
 import { createReviewRunner, getConfirmedText } from "@/lib/review/client.mjs";
 
 export default function WritingWorkspace() {
@@ -12,11 +13,16 @@ export default function WritingWorkspace() {
   const runnerRef = useRef(null);
   const reviewRef = useRef(null);
   const pendingRef = useRef(false);
+  const editingRef = useRef(false);
   const [hasInk, setHasInk] = useState(false);
   const [loading, setLoading] = useState(false);
   const [review, setReview] = useState(null);
   const [error, setError] = useState(null);
   const [stale, setStale] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [snapshotBounds, setSnapshotBounds] = useState(null);
+  const [selectedIssueId, setSelectedIssueId] = useState(null);
+  const highlights = useMemo(() => handwritingHighlights(review, snapshotBounds), [review, snapshotBounds]);
   const [selections, setSelections] = useState({});
   const [confirmedText, setConfirmedText] = useState("");
   const [intentDescriptions, setIntentDescriptions] = useState({});
@@ -35,15 +41,15 @@ export default function WritingWorkspace() {
     if (panelOpen === true) panelHeadingRef.current?.focus({ preventScroll: true });
   }, [panelOpen]);
 
-  const handleDrawingChange = useCallback((drawing) => {
-    drawingRef.current = drawing;
-    setHasInk(drawing.hasInk);
+  const invalidateReview = useCallback(() => {
     if (reviewRef.current || pendingRef.current) setStale(true);
     runnerRef.current?.cancel();
     pendingRef.current = false;
-    setLoading(false);
     reviewRef.current = null;
+    setLoading(false);
     setReview(null);
+    setSnapshotBounds(null);
+    setSelectedIssueId(null);
     setError(null);
     setSelections({});
     setConfirmedText("");
@@ -52,20 +58,39 @@ export default function WritingWorkspace() {
     setSuggesting(false);
   }, []);
 
+  const handleEditStart = useCallback(() => {
+    editingRef.current = true;
+    setEditing(true);
+    invalidateReview();
+  }, [invalidateReview]);
+
+  const handleEditEnd = useCallback(() => {
+    editingRef.current = false;
+    setEditing(false);
+  }, []);
+
+  const handleDrawingChange = useCallback((drawing) => {
+    drawingRef.current = drawing;
+    setHasInk(drawing.hasInk);
+    invalidateReview();
+  }, [invalidateReview]);
+
   function handleReview(text) {
-    if (!drawingRef.current.hasInk || !canvasRef.current) return;
-    // Button clicks pass an event; only an explicit string confirms text.
+    // Button clicks pass an event; only a string confirms text.
     const confirming = typeof text === "string";
+    if (!drawingRef.current.hasInk || !canvasRef.current || editingRef.current) return;
     const revision = drawingRef.current.revision;
     runnerRef.current?.run({
       revision,
       ...(confirming ? { text } : {}),
-      exportImage: () => canvasRef.current.exportReviewImage(),
-      isCurrent: (submittedRevision) => drawingRef.current.revision === submittedRevision,
+      exportSnapshot: () => canvasRef.current.exportSnapshot(),
+      isCurrent: (submittedRevision) => !editingRef.current && drawingRef.current.revision === submittedRevision,
       onStart() {
-        setLoading(true);
         pendingRef.current = true;
+        setLoading(true);
+        setSelectedIssueId(null);
         if (!confirming) {
+          setSnapshotBounds(null);
           reviewRef.current = null;
           setReview(null);
           setSelections({});
@@ -77,7 +102,8 @@ export default function WritingWorkspace() {
         setStale(false);
         setPanelOpen(true);
       },
-      onSuccess(result) {
+      onSuccess(result, snapshot) {
+        if (snapshot) setSnapshotBounds(snapshot.bounds);
         reviewRef.current = result;
         setReview(result);
         setSelections({});
@@ -86,7 +112,7 @@ export default function WritingWorkspace() {
         setIntentSuggestions({});
       },
       onError: setError,
-      onFinish() { pendingRef.current = false; setLoading(false); },
+      onFinish: () => { pendingRef.current = false; setLoading(false); },
     });
   }
 
@@ -100,14 +126,14 @@ export default function WritingWorkspace() {
   function handleSuggest(id) {
     const current = reviewRef.current;
     const description = intentDescriptions[id];
-    if (!current?.intentTargets?.some((target) => target.id === id) || !description?.trim() ||
+    if (editingRef.current || !current?.intentTargets?.some((target) => target.id === id) || !description?.trim() ||
       current.revision !== drawingRef.current.revision) return;
     const target = current.intentTargets.find((entry) => entry.id === id);
     const characters = Array.from(current.recognizedText);
     const context = `${characters.slice(0, target.start).join("")}[unclear]${characters.slice(target.end).join("")}`;
     runnerRef.current?.run({
       intent: description, context: context.slice(0, 2000), revision: current.revision,
-      isCurrent: (revision) => revision === drawingRef.current.revision && reviewRef.current === current,
+      isCurrent: (revision) => !editingRef.current && revision === drawingRef.current.revision && reviewRef.current === current,
       onStart() {
         pendingRef.current = true;
         setLoading(true);
@@ -138,7 +164,7 @@ export default function WritingWorkspace() {
           <p className="text-sm text-neutral-500">A little room to practise.</p>
         </div>
         <button
-          type="button" onClick={handleReview} disabled={!hasInk || loading}
+          type="button" onClick={handleReview} disabled={!hasInk || loading || editing}
           className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40"
         >{loading ? "Reviewing…" : "Review"}</button>
         <button
@@ -149,7 +175,7 @@ export default function WritingWorkspace() {
       </header>
       <div className="flex min-h-0 flex-1 gap-6">
         {/* Keep the canvas mounted here across every panel/layout state. */}
-        <HandwritingCanvas ref={canvasRef} disabled={loading} onChange={handleDrawingChange} />
+        <HandwritingCanvas ref={canvasRef} onChange={handleDrawingChange} onEditStart={handleEditStart} onEditEnd={handleEditEnd} grammarHighlights={highlights} selectedIssueId={selectedIssueId} />
         <aside
           id="writing-review-panel" aria-labelledby="writing-review-heading"
           className={`${panelVisibility} fixed inset-x-0 bottom-0 z-20 max-h-[60dvh] flex-col overflow-y-auto rounded-t-xl border border-neutral-200 bg-white p-5 shadow-lg lg:static lg:z-auto lg:max-h-none lg:w-[360px] lg:shrink-0 lg:rounded-xl lg:shadow-none`}
@@ -159,7 +185,8 @@ export default function WritingWorkspace() {
             <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Writing Review</h2>
             <button type="button" onClick={closePanel} aria-label="Collapse Writing Review" className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-100 focus-visible:outline-2">Collapse</button>
           </div>
-          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk} onReview={handleReview}
+          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk && !editing} onReview={handleReview}
+            selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId}
             selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
             confirmedText={confirmedText} onEditText={setConfirmedText} suggesting={suggesting}
             intentDescriptions={intentDescriptions} intentSuggestions={intentSuggestions} onSuggest={handleSuggest}

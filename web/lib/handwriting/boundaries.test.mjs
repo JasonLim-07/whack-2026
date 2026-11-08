@@ -20,7 +20,7 @@ test("cell ownership uses the existing grid and floor, including negative coordi
 test("inside strokes, minor overshoots and equality at tolerance boundaries are allowed", () => {
   const cell = { row: 0, column: 0 };
   for (const point of [{ x: 0, y: 0 }, { x: 48, y: 48 }, { x: 96, y: 96 },
-    { x: -4.8, y: 48 }, { x: 100.8, y: 48 }, { x: 48, y: -4.8 }, { x: 48, y: 100.8 },
+    { x: -9.6, y: 48 }, { x: 105.6, y: 48 }, { x: 48, y: -9.6 }, { x: 48, y: 105.6 },
     { x: 100, y: -4 }]) assert.equal(crossesCell(point, cell), false);
   assert.equal(crossesCell({ x: 97, y: 48 }, cell, 0), true);
   assert.equal(crossesCell({ x: 105, y: 48 }, cell, 0.1), false);
@@ -28,8 +28,8 @@ test("inside strokes, minor overshoots and equality at tolerance boundaries are 
 
 test("significant exits on every side and all diagonals, in positive and negative cells", () => {
   for (const cell of [{ row: 0, column: 0 }, { row: -2, column: -3 }]) {
-    for (const [x, y] of [[-4.81,48], [100.81,48], [48,-4.81], [48,100.81],
-      [-5,-5], [-5,101], [101,-5], [101,101]]) {
+    for (const [x, y] of [[-9.61,48], [105.61,48], [48,-9.61], [48,105.61],
+      [-10,-10], [-10,106], [106,-10], [106,106]]) {
       assert.equal(crossesCell({ x: cell.column * GRID_SIZE + x, y: cell.row * GRID_SIZE + y }, cell), true);
     }
   }

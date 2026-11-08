@@ -7,10 +7,12 @@ import { normaliseReviewOcrResult, recogniseHandwriting } from "./reviewOcr.js";
 import { normalizeOcrResult } from "./transcribe.js";
 import { buildThreeTierOcrResponse } from "./ocr.js";
 
+const locations = (text) => Array.from(text, (text, start) => ({ text, start, end: start + 1, bounds: null }));
+
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
 const issue = {
-  id: "issue-1", type: "grammar", original: "个", replacement: "本",
+  id: "issue-1", start: 3, end: 4, type: "grammar", original: "个", replacement: "本",
   explanation: "Use 本 as the measure word for books.",
 };
 const correction = { correctedText: "我有两本书。", issues: [issue] };
@@ -85,6 +87,7 @@ test("multipart PNG review combines OCR and grammar with the exact contract", as
   assert.deepEqual(calls, ["ocr", "grammar"]);
   const result = await response.json();
   assert.deepEqual(result, {
+    ocrCharacters: [],
     recognizedText: "我有两个书。", ocrConfidence: null, ocrSegments: [],
     correctedText: "我有两本书。", issues: [issue], revision: 3,
   });
@@ -250,6 +253,7 @@ test("original OCR text and real segment confidence are preserved without derivi
   }));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
+    ocrCharacters: [],
     recognizedText: text, ocrConfidence: null, ocrSegments: segments,
     correctedText: text, issues: [], revision: null,
   });
@@ -406,6 +410,41 @@ test("wired route sanitizes missing OCR credentials without making a request", a
   assert.equal(network.mock.callCount(), 0);
 });
 
+test("OCR adapter preserves exact character ranges, boxes, and original supplementary characters", () => {
+  const text = "\u{20000}\u4e2a\u4e2a";
+  const characters = Array.from(text, (originalCharacter, index) => ({
+    originalCharacter, confidence: 0.9, bounds: { x: 10 + index * 20, y: 15, width: 18, height: 24 },
+  }));
+  const result = normaliseReviewOcrResult(buildThreeTierOcrResponse({ originalText: text, provider: "google-cloud-vision", characters }), { width: 200, height: 100 });
+  assert.deepEqual(result.characters.map(({ text, start, end }) => ({ text, start, end })), [
+    { text: "\u{20000}", start: 0, end: 1 }, { text: "\u4e2a", start: 1, end: 2 }, { text: "\u4e2a", start: 2, end: 3 },
+  ]);
+  assert.deepEqual(result.characters[1].bounds, characters[1].bounds);
+  assert.equal(result.confidence, null);
+  const unaligned = normaliseReviewOcrResult(buildThreeTierOcrResponse({ originalText: text + "x", provider: "google-cloud-vision", characters }));
+  assert.deepEqual(unaligned.characters, []);
+  assert.equal(unaligned.text, text + "x");
+});
+
+test("real PNG dimensions scale Gemini boxes correctly instead of using the 800x400 default", async () => {
+  const { readPngDimensions } = await import("./reviewOcr.js");
+  const { encodePngRgba } = await import("./pngUtils.js");
+  const bytes = encodePngRgba(200, 100, Buffer.alloc(200 * 100 * 4, 255));
+  const dimensions = readPngDimensions(bytes);
+  assert.deepEqual(dimensions, { width: 200, height: 100 });
+  assert.throws(() => readPngDimensions(Buffer.from("not-png")), /PNG/);
+  const result = normalizeOcrResult({ provider: "gemini-vision", characters: [{ character: "\u4e2a", box2d: [100,200,900,800] }] }, { canvas: dimensions });
+  const adapted = normaliseReviewOcrResult(buildThreeTierOcrResponse(result), dimensions);
+  assert.deepEqual(adapted.characters[0].bounds, { x: 40, y: 10, width: 120, height: 80 });
+  assert.equal(adapted.segments[0].confidence, null);
+});
+
+test("review rejects invalid grammar ranges with a sanitized error", async () => {
+  await expectError(await handleReview(request(), dependencies({
+    analyseGrammar: async () => ({ ...correction, issues: [{ ...issue, start: 0, end: 1 }] }),
+  })), 502, "GRAMMAR_FAILED");
+});
+
 test("actual POST routes high, medium, low and unknown confidence before grammar", async (t) => {
   // Select the real Cloud Vision code path; only its transport is mocked.
   process.env.OCR_PROVIDER = "vision";
@@ -445,7 +484,7 @@ test("JSON confirmation invokes the real grammar module and bypasses OCR", async
     assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), { text: "我有三书", level: "beginner" });
     grammarCalls++;
     return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({
-      correctedText: "我有三本书", issues: [{ ...issue, original: "三书", replacement: "三本书" }],
+      correctedText: "我有三本书", issues: [{ ...issue, start: 2, end: 4, original: "三书", replacement: "三本书" }],
     }) }] }, finishReason: "STOP" }] });
   });
   const response = await POST(new Request("http://localhost/api/review", {
@@ -455,8 +494,8 @@ test("JSON confirmation invokes the real grammar module and bypasses OCR", async
   assert.equal(response.status, 200);
   assert.equal(grammarCalls, 1);
   assert.deepEqual(await response.json(), {
-    recognizedText: "我有三书", ocrConfidence: null, ocrSegments: [],
-    correctedText: "我有三本书", issues: [{ ...issue, original: "三书", replacement: "三本书" }], revision: 4,
+    ocrCharacters: [], recognizedText: "我有三书", ocrConfidence: null, ocrSegments: [],
+    correctedText: "我有三本书", issues: [{ ...issue, start: 2, end: 4, original: "三书", replacement: "三本书" }], revision: 4,
   });
 });
 

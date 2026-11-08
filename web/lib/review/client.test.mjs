@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview, requestIntentSuggestions, validateIntentResult } from "./client.mjs";
 
 const review = (revision = 3) => ({
-  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], revision,
-  issues: [{ id: "one", type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
+  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], ocrCharacters: [], revision,
+  issues: [{ id: "one", start: 3, end: 4, type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
 });
 const image = new Blob(["test-png"], { type: "image/png" });
 const deferred = () => {
@@ -182,7 +182,7 @@ test("frontend verification to JSON confirmation runs grammar only after explici
     analyseGrammar: async (text) => {
       stages.push("grammar");
       assert.equal(text, "我有三书。");
-      return { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
+      return { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
     },
   });
   const pending = await requestReview(new Blob([png], { type: "image/png" }), 3, undefined, send);
@@ -354,4 +354,59 @@ test("discarding a stray mark is explicit and allowed only for an omitted region
   assert.throws(() => getConfirmedText(missing, {}), /Choose/);
   assert.equal(getConfirmedText(missing, { mark: "" }), "我有三书。");
   assert.throws(() => getConfirmedText(intentReview(), { "intent:3": "" }), /Choose/);
+});
+
+test("snapshot metadata is delivered with its result; edits during export cancel old callbacks", async () => {
+  const firstExport = deferred();
+  let submissions = 0;
+  const runner = createReviewRunner(async () => { submissions++; return review(); });
+  const first = callbacks({ exportSnapshot: () => firstExport.promise });
+  const task = runner.run(first.options);
+  runner.cancel(); // Called immediately at ink-edit start, before revision commits.
+  const bounds = { left: -70, top: -90, width: 200, height: 100 };
+  let captured;
+  const next = callbacks({ exportSnapshot: async () => ({ image, revision: 3, bounds }), onSuccess: (value, snapshot) => { captured = { value, snapshot }; } });
+  await runner.run(next.options);
+  firstExport.resolve({ image, revision: 3, bounds });
+  await task;
+  assert.equal(submissions, 1);
+  assert.equal(captured.snapshot.bounds, bounds);
+  assert.deepEqual(captured.value, review());
+  assert.deepEqual(first.events, ["start"]);
+  assert.deepEqual(next.events, ["start", "finish"]);
+});
+
+test("combined snapshot retains spatial coverage through review and world origin for grammar highlights", async () => {
+  const { handleReview } = await import("../ai/review.js");
+  const { handwritingHighlights } = await import("./locations.mjs");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
+  const box = { x: 0, y: 0, width: 1, height: 1 };
+  const snapshot = { image: new Blob([png], { type: "image/png" }), revision: 3,
+    bounds: { left: -90, top: -20, width: 1, height: 1 },
+    spatial: { width: 1, height: 1, regions: [{ id: "0:0", row: 0, column: 0, ambiguous: false, bounds: box }] } };
+  const issue = { id: "one", start: 0, end: 1, type: "character", original: "书", replacement: "树", explanation: "Use the character for tree." };
+  let result;
+  const runner = createReviewRunner((payload, revision, signal) => requestReview(payload, revision, signal, async (_, init) => {
+    assert.deepEqual(JSON.parse(init.body.get("spatial")), snapshot.spatial);
+    return handleReview(new Request("http://localhost/api/review", init), {
+      recogniseHandwriting: async () => ({ text: "书", confidence: null, status: "SUCCESS", requiresVerification: false,
+        segments: [{ text: "书", confidence: 0.95, bounds: box }], characters: [{ text: "书", start: 0, end: 1, bounds: box }] }),
+      analyseGrammar: async () => ({ correctedText: "树", issues: [issue] }),
+    });
+  }));
+  await runner.run(callbacks({ exportSnapshot: async () => snapshot, onSuccess: (value, captured) => { result = { value, captured }; } }).options);
+  assert.equal(result.value.correctedText, "树");
+  assert.deepEqual(handwritingHighlights(result.value, result.captured.bounds), [{ issueId: "one", x: -90, y: -20, width: 1, height: 1 }]);
+});
+
+test("snapshot revision mismatch never reaches OCR and intent bypasses snapshot export", async () => {
+  let submissions = 0;
+  const runner = createReviewRunner(async () => { submissions++; }, undefined, async () => ({ revision: 3, suggestions: suggestions["intent:3"] }));
+  const mismatch = callbacks({ exportSnapshot: async () => ({ image, revision: 2 }) });
+  await runner.run(mismatch.options);
+  assert.equal(submissions, 0);
+  assert.deepEqual(mismatch.events, ["start", "finish"]);
+  const intent = callbacks({ intent: "book", context: "我有三[unclear]。", exportSnapshot: () => { throw new Error("Must not export"); } });
+  await runner.run(intent.options);
+  assert.deepEqual(intent.events, ["start", { revision: 3, suggestions: suggestions["intent:3"] }, "finish"]);
 });

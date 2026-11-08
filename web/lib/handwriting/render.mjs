@@ -41,7 +41,7 @@ export function drawStroke(ctx, stroke) {
   ctx.stroke();
 }
 
-export function renderWhiteboard(ctx, size, viewport, strokes, activeStroke) {
+export function renderWhiteboard(ctx, size, viewport, strokes, activeStroke, renderUnderInk) {
   const { width, height, dpr } = size;
   // Reset each frame: resizing the bitmap also resets Canvas 2D state.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -64,6 +64,7 @@ export function renderWhiteboard(ctx, size, viewport, strokes, activeStroke) {
   ctx.lineWidth = 1 / viewport.zoom;
   ctx.lineCap = "butt";
   ctx.stroke();
+  renderUnderInk?.();
   for (const stroke of strokes) drawStroke(ctx, stroke);
   if (activeStroke) drawStroke(ctx, activeStroke);
 }
@@ -99,6 +100,26 @@ export function renderBoundaryWarnings(ctx, size, viewport, cells, warnings, now
     ctx.lineTo(x - 4 * unit, y + 3 * unit);
     ctx.closePath();
     ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Transient grammar rectangles are drawn behind ink and never used by PNG export.
+export function renderGrammarHighlights(ctx, size, viewport, highlights, selectedIssueId) {
+  if (!highlights.length) return;
+  ctx.save();
+  ctx.setTransform(size.dpr, 0, 0, size.dpr, 0, 0);
+  ctx.translate(viewport.offsetX, viewport.offsetY);
+  ctx.scale(viewport.zoom, viewport.zoom);
+  for (const highlight of highlights) {
+    const selected = highlight.issueId === selectedIssueId;
+    ctx.fillStyle = selected ? "rgba(59, 130, 246, 0.26)" : "rgba(59, 130, 246, 0.10)";
+    ctx.fillRect(highlight.x - 2, highlight.y - 2, highlight.width + 4, highlight.height + 4);
+    if (selected) {
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1.5 / viewport.zoom;
+      ctx.strokeRect(highlight.x - 2, highlight.y - 2, highlight.width + 4, highlight.height + 4);
+    }
   }
   ctx.restore();
 }

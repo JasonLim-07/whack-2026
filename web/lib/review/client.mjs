@@ -1,4 +1,5 @@
 import { isLatinOnlyText, CHINESE_TEXT_MESSAGE } from "./text.mjs";
+import { validTextRange, validOcrCharacters } from "./locations.mjs";
 
 const INVALID_RESPONSE = "The review service returned an unexpected response. Please try again.";
 const validConfidence = (value) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1);
@@ -14,6 +15,7 @@ export function validateReview(review, revision) {
   for (const segment of review.ocrSegments) {
     if (!segment || typeof segment.text !== "string" || !validConfidence(segment.confidence)) throw new Error(INVALID_RESPONSE);
   }
+  if (review.ocrCharacters !== undefined && !validOcrCharacters(review.ocrCharacters, review.recognizedText)) throw new Error(INVALID_RESPONSE);
   if (review.requiresVerification === true) {
     if (review.status !== "LOW_CONFIDENCE" || !Array.isArray(review.characterCandidates)) throw new Error(INVALID_RESPONSE);
     if (review.requiresTextConfirmation === true &&
@@ -61,6 +63,7 @@ export function validateReview(review, revision) {
       ![issue.original, issue.replacement, issue.explanation].every((value) => typeof value === "string")) {
       throw new Error(INVALID_RESPONSE);
     }
+    if (!validTextRange(review.recognizedText, issue.start, issue.end, issue.original)) throw new Error(INVALID_RESPONSE);
     ids.add(issue.id);
   }
   return review;
@@ -162,19 +165,22 @@ async function sendReview(body, headers, revision, signal, fetchImpl, endpoint =
 export function createReviewRunner(send = requestReview, sendConfirmed = requestConfirmedReview, sendIntent = requestIntentSuggestions) {
   let active = null;
   return {
-    async run({ exportImage, text, intent, context, revision, isCurrent, onStart, onSuccess, onError, onFinish }) {
+    async run({ exportImage, exportSnapshot, text, intent, context, revision, isCurrent, onStart, onSuccess, onError, onFinish }) {
       if (active) return false;
       const controller = new AbortController();
       active = controller;
       onStart();
       try {
         const confirming = text !== undefined;
-        const payload = intent !== undefined ? intent : confirming ? text : await exportImage();
+        const snapshot = intent !== undefined || confirming ? null
+          : exportSnapshot ? await exportSnapshot() : { image: await exportImage(), revision };
+        if (snapshot && snapshot.revision !== revision) return false;
         if (active !== controller || !isCurrent(revision)) return false;
         const review = intent !== undefined
           ? await sendIntent(intent, context, revision, controller.signal)
-          : await (confirming ? sendConfirmed : send)(payload, revision, controller.signal);
-        if (active === controller && isCurrent(revision)) onSuccess(review);
+          : confirming ? await sendConfirmed(text, revision, controller.signal)
+            : await send(snapshot.spatial === undefined ? snapshot.image : snapshot, revision, controller.signal);
+        if (active === controller && isCurrent(revision)) onSuccess(review, snapshot);
       } catch (error) {
         if (active === controller && error.name !== "AbortError" && isCurrent(revision)) onError(error.message || "Unable to review handwriting. Please try again.");
       } finally {
