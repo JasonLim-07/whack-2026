@@ -6,6 +6,10 @@ import {
   prepareRecognitionInput,
 } from "./transcribe.js";
 import { clusterStrokesIntoCharacters } from "./pngUtils.js";
+import {
+  analyzeGrammar,
+  evaluateStrokeDifference,
+} from "../utils/ssim.js";
 
 const HIGH_CONFIDENCE_THRESHOLD = 0.9;
 const LOW_CONFIDENCE_THRESHOLD = 0.6;
@@ -433,6 +437,10 @@ export function buildThreeTierOcrResponse(normalizedResult) {
 
   const rawConf = parseConfidence(normalizedResult?.confidence);
   const confidence = rawConf !== null ? rawConf : 0.0;
+  const segments = chars.map((c) => ({
+    text: String(c?.character || "").trim(),
+    confidence: parseConfidence(c?.confidence),
+  }));
 
   // Tier 3: Low Confidence (< 0.60) or empty/unreadable input -> NO context ranking
   if (!rawText || confidence < LOW_CONFIDENCE_THRESHOLD) {
@@ -443,6 +451,7 @@ export function buildThreeTierOcrResponse(normalizedResult) {
       confidence,
       requiresVerification: false,
       characterCandidates: [],
+      segments: [],
     };
   }
 
@@ -455,6 +464,7 @@ export function buildThreeTierOcrResponse(normalizedResult) {
       confidence,
       requiresVerification: false,
       characterCandidates: [],
+      segments,
     };
   }
 
@@ -556,6 +566,7 @@ export function buildThreeTierOcrResponse(normalizedResult) {
     recognizedText,
     text: rawText,
     characterCandidates,
+    segments,
   };
 }
 
@@ -564,9 +575,20 @@ export function buildThreeTierOcrResponse(normalizedResult) {
  * using the 3-tier confidence model with Tier 2 context-aware candidate ranking.
  */
 export async function recognizeHandwriting(imageBase64, options = {}) {
+  const opts =
+    typeof options === "string"
+      ? { mimeType: options }
+      : options && typeof options === "object"
+      ? options
+      : {};
+
   let prepared;
   try {
-    prepared = prepareRecognitionInput(imageBase64);
+    prepared = prepareRecognitionInput(
+      opts.mimeType && (Buffer.isBuffer(imageBase64) || imageBase64 instanceof Uint8Array)
+        ? { image: imageBase64, mimeType: opts.mimeType }
+        : imageBase64
+    );
   } catch {
     return {
       status: "UNREADABLE",
@@ -575,14 +597,15 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
       confidence: 0,
       requiresVerification: false,
       characterCandidates: [],
+      segments: [],
     };
   }
 
   const { image, strokes, canvas, language } = prepared;
   const strokeClusters = clusterStrokesIntoCharacters(strokes);
 
-  if (options.mockResult) {
-    const normalized = normalizeOcrResult(options.mockResult, {
+  if (opts.mockResult) {
+    const normalized = normalizeOcrResult(opts.mockResult, {
       strokeClusters,
       canvas,
       language,
@@ -591,7 +614,7 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
     return buildThreeTierOcrResponse(normalized);
   }
 
-  const apiKey = resolveOcrApiKey(options);
+  const apiKey = resolveOcrApiKey(opts);
   if (!apiKey) {
     const err = new Error(
       "Missing vision API key. Set OCR_API_KEY or VISION_API_KEY in environment variables."
@@ -602,12 +625,12 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
   }
 
   const provider = (
-    options.provider ||
+    opts.provider ||
     process.env.OCR_PROVIDER ||
     "auto"
   ).toLowerCase();
   const model =
-    options.model || process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+    opts.model || process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
 
   let rawModelResult;
   if (provider === "gemini") {
@@ -618,14 +641,14 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
       language,
       model,
       apiKey,
-      fetchImpl: options.fetchImpl,
+      fetchImpl: opts.fetchImpl,
     });
   } else if (provider === "vision" || provider === "cloud-vision") {
     rawModelResult = await callCloudVisionOcr({
       base64: image.base64,
       language,
       apiKey,
-      fetchImpl: options.fetchImpl,
+      fetchImpl: opts.fetchImpl,
     });
   } else {
     try {
@@ -633,7 +656,7 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
         base64: image.base64,
         language,
         apiKey,
-        fetchImpl: options.fetchImpl,
+        fetchImpl: opts.fetchImpl,
       });
     } catch (visionErr) {
       if (visionErr.status === 429) throw visionErr;
@@ -645,7 +668,7 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
           language,
           model,
           apiKey,
-          fetchImpl: options.fetchImpl,
+          fetchImpl: opts.fetchImpl,
         });
       } catch {
         throw visionErr;
@@ -661,6 +684,158 @@ export async function recognizeHandwriting(imageBase64, options = {}) {
   });
 
   return buildThreeTierOcrResponse(normalized);
+}
+
+/**
+ * Orchestrates the 3-tier confidence OCR + conditional SSIM stroke verification + grammar review pipeline:
+ *   - Condition A (Tier 1 High Confidence >= 0.90):
+ *     Runs `evaluateStrokeDifference()` immediately on the transcribed character(s) and passes
+ *     `strokeAnalysis` straight into `analyzeGrammar()`.
+ *   - Condition B (Tier 2 Medium Confidence 0.60 - 0.89):
+ *     Skips SSIM on initial load while candidates are displayed (`strokeAnalysis: { evaluated: false }`).
+ *     Runs `evaluateStrokeDifference()` ONLY AFTER the user confirms one of the candidate options
+ *     (`{ text: "...", selectedChar: "..." }`).
+ *   - Tier 3 (Low Confidence < 0.60):
+ *     Rejects with HTTP 422 and status "UNREADABLE".
+ */
+export async function processHandwritingReview(payload = {}, options = {}) {
+  // Condition B Follow-Up: User confirmed a candidate character from the Tier 2 UI disambiguation panel
+  if (
+    typeof payload?.text === "string" &&
+    payload.text.trim().length > 0 &&
+    !payload.imageBase64
+  ) {
+    const confirmedText = payload.text.trim();
+    const targetChar =
+      String(payload.selectedChar || "").trim() ||
+      Array.from(confirmedText)[0] ||
+      "";
+    const userCanvas = payload.userCanvas || payload.canvas || null;
+
+    let ssimResult = {
+      hasMissingStrokes: false,
+      missingPercentage: 0,
+      missingRegion: "none",
+    };
+    if (userCanvas && targetChar) {
+      ssimResult = evaluateStrokeDifference(userCanvas, targetChar);
+    }
+
+    const strokeAnalysis = {
+      evaluated: true,
+      hasMissingStrokes: ssimResult.hasMissingStrokes,
+      missingPercentage: ssimResult.missingPercentage,
+      missingRegion: ssimResult.missingRegion,
+      targetChar,
+    };
+
+    const grammar = await analyzeGrammar(confirmedText, strokeAnalysis, options);
+
+    return {
+      httpStatus: 200,
+      body: {
+        status: "COMPLETE",
+        recognizedText: confirmedText,
+        confidence:
+          typeof payload.confidence === "number" ? payload.confidence : 0.85,
+        strokeAnalysis: {
+          evaluated: true,
+          hasMissingStrokes: strokeAnalysis.hasMissingStrokes,
+          missingPercentage: strokeAnalysis.missingPercentage,
+        },
+        grammar: {
+          hasErrors: grammar.hasErrors,
+          correctedText: grammar.correctedText,
+          issues: grammar.issues,
+        },
+      },
+    };
+  }
+
+  // Initial Image Submission: Run 3-Tier OCR
+  const imageInput = payload?.imageBase64 || payload?.image || "";
+  const ocrResult = await recognizeHandwriting(imageInput, options);
+
+  // Tier 3 (< 0.60): Reject immediately with HTTP 422 and status "UNREADABLE"
+  if (ocrResult.status === "UNREADABLE") {
+    return {
+      httpStatus: 422,
+      body: {
+        status: "UNREADABLE",
+        message:
+          "Could not detect handwriting clearly. Please rewrite your characters more legibly.",
+        recognizedText: "",
+        confidence: ocrResult.confidence,
+        requiresVerification: false,
+        characterCandidates: [],
+      },
+    };
+  }
+
+  // Condition B Initial Load (Tier 2: 0.60 - 0.89):
+  // DO NOT run SSIM while candidates are being displayed; return verification payload
+  if (ocrResult.status === "LOW_CONFIDENCE" || ocrResult.requiresVerification) {
+    return {
+      httpStatus: 200,
+      body: {
+        status: "LOW_CONFIDENCE",
+        recognizedText: ocrResult.recognizedText,
+        text: ocrResult.text,
+        confidence: ocrResult.confidence,
+        requiresVerification: true,
+        characterCandidates: ocrResult.characterCandidates,
+        strokeAnalysis: {
+          evaluated: false,
+        },
+      },
+    };
+  }
+
+  // Condition A (Tier 1: High Confidence >= 0.90):
+  // Run evaluateStrokeDifference() directly on the transcribed character(s) and pass to analyzeGrammar()
+  const targetChar =
+    String(payload.targetChar || "").trim() ||
+    Array.from(ocrResult.text)[0] ||
+    "";
+  const userCanvas = payload.userCanvas || imageInput;
+
+  let ssimResult = {
+    hasMissingStrokes: false,
+    missingPercentage: 0,
+    missingRegion: "none",
+  };
+  if (userCanvas && targetChar) {
+    ssimResult = evaluateStrokeDifference(userCanvas, targetChar);
+  }
+
+  const strokeAnalysis = {
+    evaluated: true,
+    hasMissingStrokes: ssimResult.hasMissingStrokes,
+    missingPercentage: ssimResult.missingPercentage,
+    missingRegion: ssimResult.missingRegion,
+    targetChar,
+  };
+
+  const grammar = await analyzeGrammar(ocrResult.text, strokeAnalysis, options);
+
+  return {
+    httpStatus: 200,
+    body: {
+      status: "COMPLETE",
+      recognizedText: ocrResult.text,
+      confidence: ocrResult.confidence,
+      strokeAnalysis: {
+        evaluated: true,
+        hasMissingStrokes: strokeAnalysis.hasMissingStrokes,
+        missingPercentage: strokeAnalysis.missingPercentage,
+      },
+      grammar: {
+        hasErrors: grammar.hasErrors,
+        correctedText: grammar.correctedText,
+        issues: grammar.issues,
+      },
+    },
+  };
 }
 
 export const recogniseHandwriting = recognizeHandwriting;
