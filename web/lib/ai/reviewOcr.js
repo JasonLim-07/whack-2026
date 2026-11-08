@@ -17,6 +17,7 @@ export function normaliseReviewOcrResult(result) {
     segments: (result.characters || []).map((character) => ({
       text: character.originalCharacter,
       confidence: result.provider === "google-cloud-vision" ? character.confidence : null,
+      ...(character.bounds ? { bounds: character.bounds } : {}),
     })),
   };
 }

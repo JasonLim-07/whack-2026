@@ -1,6 +1,6 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview } from "./client.mjs";
+import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview, requestIntentSuggestions, validateIntentResult } from "./client.mjs";
 
 const review = (revision = 3) => ({
   recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], revision,
@@ -194,6 +194,34 @@ test("frontend verification to JSON confirmation runs grammar only after explici
   assert.equal(result.correctedText, "我有三本书。");
 });
 
+test("review upload forwards optional spatial metadata from the same export snapshot", async () => {
+  const spatial = { width: 120, height: 100, regions: [{ id: "0:0", row: 0, column: 0, ambiguous: false,
+    bounds: { x: 24, y: 24, width: 40, height: 50 } }] };
+  await requestReview({ image, spatial }, 3, undefined, async (_, options) => {
+    assert.equal(options.body.get("image").size, image.size);
+    assert.deepEqual(JSON.parse(options.body.get("spatial")), spatial);
+    assert.equal(options.body.get("revision"), "3");
+    return Response.json(review());
+  });
+});
+
+test("whole-text clarification allows missing-character entry without guessing its position", () => {
+  const value = { ...verification(), recognizedText: "我", characterCandidates: [], requiresTextConfirmation: true,
+    clarificationMessage: "Check unmatched marks.", unresolvedRegions: [{ id: "0:1", row: 0, column: 1 }] };
+  assert.equal(validateReview(value, 3), value);
+  assert.equal(getConfirmedText(value, {}, "我有三书。"), "我有三书。");
+  assert.throws(() => getConfirmedText(value, {}, ""), /complete Chinese text/);
+  assert.throws(() => getConfirmedText(value, {}, "Hello"), /Chinese characters/);
+  assert.equal(getConfirmedText(value, {}, "我用iPhone。"), "我用iPhone。");
+  assert.throws(() => validateReview({ ...value, unresolvedRegions: [{}] }, 3), /unexpected response/);
+});
+
+test("Latin-only confirmation is rejected before any frontend request", async () => {
+  let calls = 0;
+  await assert.rejects(requestConfirmedReview("Hello，！", 3, undefined, async () => { calls++; }), /Chinese characters/);
+  assert.equal(calls, 0);
+});
+
 test("runner guards against duplicates during export and network; unlocks after success", async () => {
   const exported = deferred();
   const response = deferred();
@@ -267,4 +295,63 @@ test("frontend multipart request passes through the real backend handler and gra
     }));
   assert.deepEqual(stages, ["ocr", "grammar"]);
   assert.deepEqual(result, review());
+});
+
+const intentReview = () => ({ ...verification(), recognizedText: "我有三□。", characterCandidates: [],
+  intentTargets: [{ id: "intent:3", start: 3, end: 4, original: "□" }] });
+const suggestions = { "intent:3": [{ text: "书", explanation: "Books." }, { text: "树", explanation: "Trees." }] };
+
+test("English-intent replacement requires explicit selection and preserves surrounding mistakes", () => {
+  assert.throws(() => getConfirmedText(intentReview(), {}, undefined, suggestions), /Choose a Chinese suggestion/);
+  assert.throws(() => getConfirmedText(intentReview(), { "intent:3": "本书" }, undefined, suggestions), /Choose a Chinese suggestion/);
+  assert.equal(getConfirmedText(intentReview(), { "intent:3": "书" }, undefined, suggestions), "我有三书。");
+});
+
+test("missing insertions and character choices compose without shifting original code-point positions", () => {
+  const pending = { ...verification(), recognizedText: "𠮷书。", characterCandidates: [{ position: 1, originalAttempt: "书", confidence: 0.75,
+    options: [{ char: "书", reason: "Original" }, { char: "韦", reason: "Alternative" }] }],
+    intentTargets: [{ id: "missing", start: 1, end: 1, original: "" }] };
+  assert.equal(getConfirmedText(pending, { missing: "有三", 1: "书" }, undefined, { missing: [{ text: "有三" }] }), "𠮷有三书。");
+});
+
+test("malformed or overlapping intent targets fail safely", () => {
+  for (const targets of [{}, null, [null], [{ id: "x", start: 3, end: 4, original: "错" }],
+    [{ id: "x", start: 3, end: 4, original: "□" }, { id: "y", start: 3, end: 4, original: "□" }]]) {
+    assert.throws(() => validateReview({ ...intentReview(), intentTargets: targets }, 3), /unexpected response/);
+  }
+});
+
+test("explicit English-intent request uses its own JSON endpoint and validates revision and Chinese options", async () => {
+  const result = { suggestions: suggestions["intent:3"], revision: 3 };
+  assert.deepEqual(await requestIntentSuggestions("books", "我有三[unclear]。", 3, undefined, async (url, init) => {
+    assert.equal(url, "/api/intent");
+    assert.deepEqual(JSON.parse(init.body), { description: "books", context: "我有三[unclear]。", revision: 3 });
+    return Response.json(result);
+  }), result);
+  for (const value of [{ ...result, revision: 4 }, { ...result, suggestions: [] },
+    { ...result, suggestions: [{ text: "books", explanation: "Wrong script" }] }]) {
+    assert.throws(() => validateIntentResult(value, 3), /unexpected response/);
+  }
+});
+
+test("intent request shares duplicate guards and ignores stale suggestions after drawing changes", async () => {
+  const waiting = deferred();
+  let count = 0;
+  const runner = createReviewRunner(() => { throw new Error("Must not export or OCR"); },
+    () => { throw new Error("Must not run grammar"); }, async () => { count++; return waiting.promise; });
+  const state = callbacks({ intent: "books", context: "我有三□。", exportImage: () => { throw new Error("No PNG export"); } });
+  const pending = runner.run(state.options);
+  assert.equal(await runner.run(state.options), false);
+  runner.cancel();
+  waiting.resolve({ suggestions: suggestions["intent:3"], revision: 3 });
+  await pending;
+  assert.equal(count, 1);
+  assert.deepEqual(state.events, ["start"]);
+});
+
+test("discarding a stray mark is explicit and allowed only for an omitted region", () => {
+  const missing = { ...intentReview(), recognizedText: "我有三书。", intentTargets: [{ id: "mark", start: 5, end: 5, original: "" }] };
+  assert.throws(() => getConfirmedText(missing, {}), /Choose/);
+  assert.equal(getConfirmedText(missing, { mark: "" }), "我有三书。");
+  assert.throws(() => getConfirmedText(intentReview(), { "intent:3": "" }), /Choose/);
 });

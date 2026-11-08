@@ -7,6 +7,7 @@ import { appendStroke, clearStrokes, commitEdit, undoEdit } from "@/lib/handwrit
 
 import { cellAt, flagBoundaryCrossing, invalidCells, pruneWarnings } from "@/lib/handwriting/boundaries.mjs";
 import { exportStrokes } from "@/lib/handwriting/export.mjs";
+import { writingRegions } from "@/lib/handwriting/regions.mjs";
 import { eraseStrokes } from "@/lib/handwriting/eraser.mjs";
 
 export default function useWhiteboard({ disabled, onChange }) {
@@ -268,6 +269,13 @@ export default function useWhiteboard({ disabled, onChange }) {
         cancel();
         return exportStrokes(strokesRef.current);
       },
+      async exportReviewImage() {
+        cancel();
+        const strokes = strokesRef.current;
+        const spatial = writingRegions(strokes);
+        const image = await exportStrokes(strokes);
+        return { image, spatial };
+      },
       selectTool(nextTool) {
         if (optionsRef.current.disabled && nextTool !== "hand") return;
         cancel();
@@ -322,6 +330,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     canvasRef,
     ui,
     exportImage: () => controllerRef.current ? controllerRef.current.exportImage() : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
+    exportReviewImage: () => controllerRef.current ? controllerRef.current.exportReviewImage() : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
     selectTool: (tool) => controllerRef.current?.selectTool(tool),
     setZoom: (zoom) => controllerRef.current?.setZoom(zoom),
     undo: () => controllerRef.current?.undo(),

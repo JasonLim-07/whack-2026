@@ -6,8 +6,8 @@ import useWhiteboard from "./useWhiteboard";
 
 export default function HandwritingCanvas({ disabled = false, onChange, ref }) {
   const helpId = useId();
-  const { rootRef, canvasRef, ui, selectTool, setZoom, undo, clear, exportImage } = useWhiteboard({ disabled, onChange });
-  useImperativeHandle(ref, () => ({ exportImage }), [exportImage]);
+  const { rootRef, canvasRef, ui, selectTool, setZoom, undo, clear, exportImage, exportReviewImage } = useWhiteboard({ disabled, onChange });
+  useImperativeHandle(ref, () => ({ exportImage, exportReviewImage }), [exportImage, exportReviewImage]);
   const navigating = ui.tool === "hand" || ui.zoom < 1 || ui.space;
   const cursor = ui.panning ? "grabbing" : navigating ? "grab" : disabled ? "not-allowed" : ui.tool === "eraser" ? "cell" : "crosshair";
 

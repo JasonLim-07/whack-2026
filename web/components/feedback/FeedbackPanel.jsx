@@ -1,24 +1,43 @@
-﻿"use client";
+"use client";
+
+import { getConfirmedText } from "@/lib/review/client.mjs";
+import { isLatinOnlyText } from "@/lib/review/text.mjs";
 
 const typeLabels = { grammar: "Grammar", word_choice: "Word choice", character: "Character usage" };
 
-function CharacterVerification({ review, selections, onSelectCharacter, onConfirm }) {
-  const complete = review.characterCandidates.every((candidate) =>
-    candidate.options.some(({ char }) => char === selections[candidate.position]));
-  const preview = Array.from(review.recognizedText);
-  for (const candidate of review.characterCandidates) {
-    if (selections[candidate.position] !== undefined) preview[candidate.position] = selections[candidate.position];
-  }
+const buttonClass = "rounded-lg bg-neutral-900 px-4 py-2 font-medium text-white focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40";
+
+function TextVerification({ value, onEdit, onConfirm }) {
+  return (
+    <section className="space-y-4" aria-label="Confirm your sentence">
+      <p>We’re unsure of the order. Please check your sentence.</p>
+      <label className="block space-y-2" htmlFor="confirmed-chinese-text">
+        <span className="font-medium">What did you mean to write?</span>
+        <textarea id="confirmed-chinese-text" lang="zh-Hans" rows={3} value={value} onChange={(event) => onEdit(event.target.value)}
+          className="block w-full rounded-lg border border-neutral-300 p-3 text-lg leading-8 focus-visible:outline-2" />
+      </label>
+      {isLatinOnlyText(value) && <p>Please enter Chinese characters.</p>}
+      <button type="button" disabled={!value.trim() || isLatinOnlyText(value)} onClick={onConfirm} className={buttonClass}>Confirm text and review</button>
+    </section>
+  );
+}
+
+function CharacterVerification({ review, selections, onSelectCharacter, onConfirm,
+  intentDescriptions, intentSuggestions, onDescribe, onSuggest }) {
+  let preview = review.recognizedText;
+  let complete = false;
+  try { preview = getConfirmedText(review, selections, undefined, intentSuggestions); complete = true; }
+  catch { /* Keep the literal transcription until every choice is confirmed. */ }
   return (
     <section aria-labelledby="verify-text-heading" className="space-y-4">
-      <h3 id="verify-text-heading" className="font-medium text-neutral-800">Confirm your writing</h3>
-      <p className="text-neutral-600">Choose the character you intended at each marked position, including the original if it is right. These are heuristic suggestions using character similarity and context; they can be wrong. Grammar review starts only after you confirm.</p>
+      <h3 id="verify-text-heading" className="font-medium text-neutral-800">What did you mean to write?</h3>
+      {review.characterCandidates.length > 0 && <p className="text-neutral-600">Choose the character you intended. Suggestions can be wrong.</p>}
       {review.characterCandidates.map((candidate) => (
         <fieldset key={candidate.position} className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
-          <legend className="px-1 font-medium">Character {candidate.position + 1}: <span lang="zh-Hans">{candidate.originalAttempt}</span></legend>
+          <legend className="px-1 font-medium">Choose for <span lang="zh-Hans">{candidate.originalAttempt}</span></legend>
           <div className="flex flex-wrap gap-2">
             {candidate.options.map((option) => (
-              <label key={option.char} className="flex cursor-pointer items-center gap-2 rounded-md border border-neutral-200 bg-white px-3 py-2 has-checked:border-neutral-800 has-checked:bg-neutral-100">
+              <label key={option.char} className="flex cursor-pointer items-center gap-2 rounded-md border border-neutral-200 bg-white px-3 py-2 has-checked:border-neutral-800">
                 <input type="radio" name={`character-${candidate.position}`} value={option.char}
                   checked={selections[candidate.position] === option.char}
                   onChange={() => onSelectCharacter(candidate.position, option.char)} className="accent-neutral-900" />
@@ -29,19 +48,44 @@ function CharacterVerification({ review, selections, onSelectCharacter, onConfir
           </div>
         </fieldset>
       ))}
+      {(review.intentTargets ?? []).map((target, index) => (
+        <fieldset key={target.id} className="space-y-3 rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+          <legend className="px-1 font-medium">Unclear part {index + 1}{target.original && <>: <span lang="zh-Hans">{target.original}</span></>}</legend>
+          <p lang="zh-Hans" className="break-words text-lg">{Array.from(review.recognizedText).slice(0, target.start).join("")}<mark>□</mark>{Array.from(review.recognizedText).slice(target.end).join("")}</p>
+          <label className="block space-y-2">
+            <span>Tell us what you meant in English</span>
+            <input type="text" maxLength={300} value={intentDescriptions[target.id] ?? ""}
+              placeholder="For example: a student" onChange={(event) => onDescribe(target.id, event.target.value)}
+              className="block w-full rounded-md border border-neutral-300 bg-white p-2" />
+          </label>
+          <button type="button" disabled={!intentDescriptions[target.id]?.trim()} onClick={() => onSuggest(target.id)} className={buttonClass}>Suggest Chinese</button>
+          {target.start === target.end && <label className="flex items-center gap-2">
+            <input type="radio" name={target.id} checked={selections[target.id] === ""}
+              onChange={() => onSelectCharacter(target.id, "")} className="accent-neutral-900" />
+            This was just an extra mark
+          </label>}
+          {(intentSuggestions[target.id] ?? []).length > 0 && <p>Choose the meaning you intended:</p>}
+          {(intentSuggestions[target.id] ?? []).map((suggestion) => (
+            <label key={suggestion.text} className="flex cursor-pointer items-start gap-2 rounded-md border border-neutral-200 bg-white p-2">
+              <input type="radio" name={target.id} checked={selections[target.id] === suggestion.text}
+                onChange={() => onSelectCharacter(target.id, suggestion.text)} className="mt-2 accent-neutral-900" />
+              <span><span lang="zh-Hans" className="block text-xl">{suggestion.text}</span><span>{suggestion.explanation}</span></span>
+            </label>
+          ))}
+        </fieldset>
+      ))}
       <div>
         <p className="mb-2 font-medium">Text to confirm</p>
-        <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{preview.join("")}</p>
+        <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{preview || "…"}</p>
       </div>
-      <button type="button" disabled={!complete} onClick={onConfirm}
-        className="rounded-lg bg-neutral-900 px-4 py-2 font-medium text-white hover:bg-neutral-800 focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40">Confirm text and review</button>
-      {!complete && <p className="text-xs text-neutral-500">Select an option for every uncertain character to continue.</p>}
+      <button type="button" disabled={!complete} onClick={onConfirm} className={buttonClass}>Confirm text and review</button>
+      {!complete && <p className="text-xs text-neutral-500">Choose an option for each unclear part to continue.</p>}
     </section>
   );
 }
 
 export default function FeedbackPanel({ review, loading, error, onReview, stale = false, canReview = true,
-  selections = {}, onSelectCharacter, onConfirm }) {
+  selections = {}, onSelectCharacter, onConfirm, confirmedText = "", onEditText, suggesting = false, intentDescriptions = {}, intentSuggestions = {}, onDescribe, onSuggest }) {
   const verifying = review?.requiresVerification === true;
   return (
     <div className="space-y-6 text-sm leading-6" aria-busy={loading}>
@@ -53,7 +97,7 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
       )}
       {loading ? (
         <div role="status" className="rounded-lg bg-neutral-50 p-4 text-neutral-600">
-          {verifying ? "Reviewing your confirmed text…" : "Reviewing your handwriting… Recognition and grammar analysis may take a moment."} You can still pan and zoom.
+          {suggesting ? "Finding Chinese suggestions…" : verifying ? "Reviewing your confirmed text…" : "Reviewing your handwriting… Recognition and grammar analysis may take a moment."} You can still pan and zoom.
         </div>
       ) : error && !verifying ? null : stale ? (
         <p role="status" className="text-neutral-600">Writing changed. Review again to update feedback.</p>
@@ -64,11 +108,11 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
           <section aria-labelledby="recognized-text-heading">
             <h3 id="recognized-text-heading" className="mb-2 font-medium text-neutral-800">Recognised Text</h3>
             <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{review.recognizedText}</p>
-            <p className="mt-2 text-xs text-neutral-500">
-              {review.ocrConfidence == null ? "Confidence unavailable." : `OCR confidence: ${(review.ocrConfidence * 100).toFixed(1)}% (provider-reported).`}
-            </p>
           </section>
-          {verifying ? <CharacterVerification review={review} selections={selections} onSelectCharacter={onSelectCharacter} onConfirm={onConfirm} /> : <>
+          {verifying ? review.requiresTextConfirmation
+            ? <TextVerification value={confirmedText} onEdit={onEditText} onConfirm={onConfirm} />
+            : <CharacterVerification review={review} selections={selections} onSelectCharacter={onSelectCharacter} onConfirm={onConfirm}
+              intentDescriptions={intentDescriptions} intentSuggestions={intentSuggestions} onDescribe={onDescribe} onSuggest={onSuggest} /> : <>
           <section aria-labelledby="corrected-text-heading">
             <h3 id="corrected-text-heading" className="mb-2 font-medium text-neutral-800">Suggested Text</h3>
             <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg border border-neutral-200 p-3 text-lg leading-8">{review.correctedText}</p>

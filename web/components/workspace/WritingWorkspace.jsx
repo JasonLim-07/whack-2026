@@ -18,6 +18,10 @@ export default function WritingWorkspace() {
   const [error, setError] = useState(null);
   const [stale, setStale] = useState(false);
   const [selections, setSelections] = useState({});
+  const [confirmedText, setConfirmedText] = useState("");
+  const [intentDescriptions, setIntentDescriptions] = useState({});
+  const [intentSuggestions, setIntentSuggestions] = useState({});
+  const [suggesting, setSuggesting] = useState(false);
   // null uses responsive CSS: open on desktop, closed on smaller screens.
   const [panelOpen, setPanelOpen] = useState(null);
 
@@ -42,6 +46,10 @@ export default function WritingWorkspace() {
     setReview(null);
     setError(null);
     setSelections({});
+    setConfirmedText("");
+    setIntentDescriptions({});
+    setIntentSuggestions({});
+    setSuggesting(false);
   }, []);
 
   function handleReview(text) {
@@ -52,7 +60,7 @@ export default function WritingWorkspace() {
     runnerRef.current?.run({
       revision,
       ...(confirming ? { text } : {}),
-      exportImage: () => canvasRef.current.exportImage(),
+      exportImage: () => canvasRef.current.exportReviewImage(),
       isCurrent: (submittedRevision) => drawingRef.current.revision === submittedRevision,
       onStart() {
         setLoading(true);
@@ -61,6 +69,9 @@ export default function WritingWorkspace() {
           reviewRef.current = null;
           setReview(null);
           setSelections({});
+          setConfirmedText("");
+          setIntentDescriptions({});
+          setIntentSuggestions({});
         }
         setError(null);
         setStale(false);
@@ -70,6 +81,9 @@ export default function WritingWorkspace() {
         reviewRef.current = result;
         setReview(result);
         setSelections({});
+        setConfirmedText(result.recognizedText);
+        setIntentDescriptions({});
+        setIntentSuggestions({});
       },
       onError: setError,
       onFinish() { pendingRef.current = false; setLoading(false); },
@@ -79,8 +93,33 @@ export default function WritingWorkspace() {
   function handleConfirm() {
     const current = reviewRef.current;
     if (!current?.requiresVerification || current.revision !== drawingRef.current.revision) return;
-    try { handleReview(getConfirmedText(current, selections)); }
+    try { handleReview(getConfirmedText(current, selections, confirmedText, intentSuggestions)); }
     catch (confirmationError) { setError(confirmationError.message); }
+  }
+
+  function handleSuggest(id) {
+    const current = reviewRef.current;
+    const description = intentDescriptions[id];
+    if (!current?.intentTargets?.some((target) => target.id === id) || !description?.trim() ||
+      current.revision !== drawingRef.current.revision) return;
+    const target = current.intentTargets.find((entry) => entry.id === id);
+    const characters = Array.from(current.recognizedText);
+    const context = `${characters.slice(0, target.start).join("")}[unclear]${characters.slice(target.end).join("")}`;
+    runnerRef.current?.run({
+      intent: description, context: context.slice(0, 2000), revision: current.revision,
+      isCurrent: (revision) => revision === drawingRef.current.revision && reviewRef.current === current,
+      onStart() {
+        pendingRef.current = true;
+        setLoading(true);
+        setSuggesting(true);
+        setError(null);
+        setSelections((value) => ({ ...value, [id]: undefined }));
+        setIntentSuggestions((value) => ({ ...value, [id]: [] }));
+      },
+      onSuccess(result) { setIntentSuggestions((value) => ({ ...value, [id]: result.suggestions })); },
+      onError: setError,
+      onFinish() { pendingRef.current = false; setLoading(false); setSuggesting(false); },
+    });
   }
 
   function closePanel() {
@@ -122,6 +161,13 @@ export default function WritingWorkspace() {
           </div>
           <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk} onReview={handleReview}
             selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
+            confirmedText={confirmedText} onEditText={setConfirmedText} suggesting={suggesting}
+            intentDescriptions={intentDescriptions} intentSuggestions={intentSuggestions} onSuggest={handleSuggest}
+            onDescribe={(id, value) => {
+              setIntentDescriptions((current) => ({ ...current, [id]: value }));
+              setIntentSuggestions((current) => ({ ...current, [id]: [] }));
+              setSelections((current) => ({ ...current, [id]: undefined }));
+            }}
             onConfirm={handleConfirm} />
         </aside>
       </div>
