@@ -3,6 +3,8 @@ import { Buffer } from "node:buffer";
 import test, { beforeEach } from "node:test";
 import { POST, runtime } from "../../app/api/review/route.js";
 import { handleReview, reviewHandwriting } from "./review.js";
+import { normaliseReviewOcrResult, recogniseHandwriting } from "./reviewOcr.js";
+import { normalizeOcrResult } from "./ocr.js";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
@@ -13,6 +15,16 @@ const issue = {
 const correction = { correctedText: "我有两本书。", issues: [issue] };
 
 beforeEach((t) => {
+  const previousEnvironment = process.env;
+  process.env = {
+    ...process.env,
+    GEMINI_API_KEY: "unit-test-key",
+    GEMINI_OCR_API_KEY: "unit-test-key",
+    GOOGLE_CLOUD_VISION_API_KEY: "unit-test-key",
+    GOOGLE_VISION_API_KEY: "unit-test-key",
+    GOOGLE_API_KEY: "unit-test-key",
+  };
+  t.after(() => { process.env = previousEnvironment; });
   t.mock.method(globalThis, "fetch", async () => {
     throw new Error("External requests are forbidden in review tests.");
   });
@@ -111,7 +123,7 @@ test("images above 5 MiB are rejected; exactly 5 MiB passes size validation", as
     png.copy(bytes);
     const data = form();
     data.set("image", new File([bytes], "writing.png", { type: "image/png" }));
-    await expectError(await POST(request(data)), size === MAX_IMAGE_BYTES ? 503 : 413,
+    await expectError(await handleReview(request(data)), size === MAX_IMAGE_BYTES ? 503 : 413,
       size === MAX_IMAGE_BYTES ? "OCR_UNAVAILABLE" : "IMAGE_TOO_LARGE");
   }
 });
@@ -264,8 +276,119 @@ test("unexpected internal failures return a safe 500", async () => {
   await expectError(await POST(brokenRequest), 500, "INTERNAL_ERROR");
 });
 
-test("actual Node.js route returns 503 until real OCR is wired in", async () => {
+test("missing injected OCR still fails safely in the standalone handler", async () => {
+  await expectError(await handleReview(request()), 503, "OCR_UNAVAILABLE");
+});
+
+test("adapter preserves original text and genuine Cloud Vision segment scores", () => {
+  const result = normalizeOcrResult({
+    provider: "google-cloud-vision", transcription: "我有三书.",
+    characters: Array.from("我有三书.", (character) => ({ character, confidence: 0.94 })),
+  });
+  assert.equal(result.text, "我有三书。");
+  assert.deepEqual(normaliseReviewOcrResult(result), {
+    text: "我有三书.", confidence: null,
+    segments: Array.from("我有三书.", (text) => ({ text, confidence: 0.94 })),
+  });
+});
+
+test("adapter discards Gemini self-rated confidence but preserves recognized characters", () => {
+  const result = normalizeOcrResult({
+    provider: "gemini-vision", transcription: "我你爱。", overallConfidence: 0.99,
+    characters: Array.from("我你爱。", (character) => ({ character, confidence: 0.99 })),
+  });
+  assert.deepEqual(normaliseReviewOcrResult(result), {
+    text: "我你爱。", confidence: null,
+    segments: Array.from("我你爱。", (text) => ({ text, confidence: null })),
+  });
+});
+
+test("adapter handles missing confidence and malformed OCR results", () => {
+  const result = normalizeOcrResult({
+    provider: "google-cloud-vision", characters: [{ character: "我" }],
+  });
+  assert.deepEqual(normaliseReviewOcrResult(result), {
+    text: "我", confidence: null, segments: [{ text: "我", confidence: null }],
+  });
+  for (const invalid of [null, {}, { success: false }, { success: true, originalText: "我" }]) {
+    assert.throws(() => normaliseReviewOcrResult(invalid), /invalid transcription result/);
+  }
+});
+
+function mockRealProviders(t, { blank = false, fail = false } = {}) {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    const body = JSON.parse(init.body);
+    const vision = String(url).includes("vision.googleapis.com");
+    const ocr = vision || body.contents?.[0]?.parts?.some((part) => part.inlineData);
+    if (ocr) {
+      calls.push("ocr");
+      if (fail) return Response.json({ error: { message: "private-provider-details secret-test-key" } }, { status: 429 });
+      const bytes = vision ? body.requests[0].image.content : body.contents[0].parts[0].inlineData.data;
+      assert.deepEqual(Buffer.from(bytes, "base64"), png);
+      const text = blank ? "" : "我有两个书.";
+      if (vision) {
+        return Response.json({ responses: [{ fullTextAnnotation: {
+          text, pages: [{ blocks: [{ paragraphs: [{ words: [{
+            symbols: Array.from(text, (text) => ({ text, confidence: 0.91 })),
+          }] }] }] }],
+        } }] });
+      }
+      return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({
+        transcription: text, overallConfidence: 0.99,
+        characters: Array.from(text, (character) => ({ character, confidence: 0.99 })),
+      }) }] } }] });
+    }
+    calls.push("grammar");
+    const input = JSON.parse(body.contents[0].parts[0].text);
+    assert.deepEqual(input, { text: "我有两个书.", level: "beginner" });
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify(correction) }] }, finishReason: "STOP" }] });
+  });
+  return calls;
+}
+
+test("actual route invokes real OCR and grammar modules with mocked network responses", async (t) => {
   assert.equal(runtime, "nodejs");
+  const calls = mockRealProviders(t);
   const response = await POST(request());
-  await expectError(response, 503, "OCR_UNAVAILABLE");
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.recognizedText, "我有两个书.");
+  assert.equal(result.ocrConfidence, null);
+  assert.equal(result.ocrSegments.map((segment) => segment.text).join(""), result.recognizedText);
+  assert.deepEqual(result.issues, [issue]);
+  assert.equal(result.correctedText, correction.correctedText);
+  assert.equal(result.revision, null);
+  assert.deepEqual(calls, ["ocr", "grammar"]);
+});
+
+test("wired OCR adapter passes into standalone orchestration without paid requests", async (t) => {
+  const calls = mockRealProviders(t);
+  const result = await reviewHandwriting({ imageBuffer: png }, {
+    recogniseHandwriting,
+    analyseGrammar: async (text) => {
+      assert.equal(text, "我有两个书.");
+      return correction;
+    },
+  });
+  assert.equal(result.recognizedText, "我有两个书.");
+  assert.deepEqual(calls, ["ocr"]);
+});
+
+test("wired route rejects unreadable OCR and preserves rate-limit handling", async (t) => {
+  let calls = mockRealProviders(t, { blank: true });
+  await expectError(await POST(request()), 400, "UNREADABLE_TEXT");
+  assert.deepEqual(calls, ["ocr"]);
+  calls = mockRealProviders(t, { fail: true });
+  await expectError(await POST(request()), 429, "RATE_LIMITED");
+  assert.deepEqual(calls, ["ocr"]);
+});
+
+test("wired route sanitizes missing OCR credentials without making a request", async (t) => {
+  for (const key of ["GEMINI_API_KEY", "GEMINI_OCR_API_KEY", "GOOGLE_CLOUD_VISION_API_KEY", "GOOGLE_VISION_API_KEY", "GOOGLE_API_KEY"]) {
+    delete process.env[key];
+  }
+  const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("Must not be called"); });
+  await expectError(await POST(request()), 502, "OCR_FAILED");
+  assert.equal(network.mock.callCount(), 0);
 });
