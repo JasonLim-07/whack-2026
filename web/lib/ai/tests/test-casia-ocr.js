@@ -231,15 +231,30 @@ async function runCasiaTest() {
   const samples = await loadCasiaSamples(5);
   assert.ok(samples.length >= 3, "Expected at least 3 CASIA samples");
 
+  const stripQuotesAndPunct = (s) =>
+    String(s || "").replace(/[，。、“”‘’《》·,."'\s]/g, "");
+
   for (const sample of samples) {
     const result = await recognizeHandwriting(sample.base64DataUrl);
     assertValidThreeTierContract(result, sample.id);
 
+    const expectedCore = stripQuotesAndPunct(sample.groundTruth);
+    const actualCore = stripQuotesAndPunct(result.text);
+    const matchStatus =
+      result.text === sample.groundTruth || actualCore === expectedCore
+        ? "PERFECT"
+        : actualCore.length > 0
+        ? "PARTIAL"
+        : "FAILED";
+
     console.log(`Sample ID:                 ${sample.id}`);
-    console.log(`Ground Truth:              ${sample.groundTruth}`);
-    console.log(`OCR Transcribed Output:    ${result.text}`);
+    console.log(`Expected (Ground Truth):   ${sample.groundTruth}`);
+    console.log(`OCR Output:                ${result.text}`);
     console.log(
-      `Confidence Score & Status: ${result.confidence} (${result.status}) | requiresVerification: ${result.requiresVerification}`
+      `Confidence Score:          ${result.confidence} (${result.status}) | requiresVerification: ${result.requiresVerification}`
+    );
+    console.log(
+      `Match Status:              ${matchStatus} (${actualCore.length}/${expectedCore.length} core chars matched)`
     );
     if (result.requiresVerification) {
       console.log(
