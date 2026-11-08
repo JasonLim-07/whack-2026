@@ -43,9 +43,11 @@ export default function MistakeNotifications({ history, selectedId, onNavigate, 
       </li>;
     })}</ul>;
   }
-  return <section aria-label="Handwriting checks" className="mb-5 space-y-3 border-b border-neutral-200 pb-4">
-    <h3 className="font-medium">Handwriting checks</h3>
+  if (!active.length && !archived.length) return null;
+  return <details className="text-xs text-neutral-500">
+    <summary className="cursor-pointer focus-visible:outline-2">Handwriting checks and session history</summary>
+    <section aria-label="Handwriting checks" className="mt-3 space-y-3">
     {active.length ? list(active) : <p className="text-sm text-neutral-500">No outstanding character checks.</p>}
     {archived.length > 0 && <details><summary className="mb-2 cursor-pointer text-sm">Session history ({archived.length})</summary>{list(archived)}</details>}
-  </section>;
+  </section></details>;
 }

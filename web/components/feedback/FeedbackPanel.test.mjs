@@ -83,7 +83,7 @@ test("grammar cards and typed highlights retain selection alongside verification
   assert.match(selected, /bg-blue-200/);
   const loading = render({ review: intent, loading: true, suggesting: true });
   assert.match(loading, /Finding Chinese suggestions/);
-  assert.match(loading, /You can keep writing/);
+  assert.match(loading, /role="status"/);
 });
 
 test("visual warning reuses character choices without claiming a stroke mistake", () => {
@@ -95,13 +95,13 @@ test("visual warning reuses character choices without claiming a stroke mistake"
   assert.match(panel, /disabled=""/);
 });
 
-<<<<<<< HEAD
 test("uncertain handwriting has typed emphasis and a focusable correction target before grammar", () => {
   const html = render({ review: pending, selectedIssueId: "mistake-1", reviewHighlights: [{ id: "mistake-1", start: 3, end: 4 }] });
   assert.match(html, /<mark/); assert.match(html, /bg-blue-200/);
   assert.match(html, /id="character-choice-3" tabindex="-1"/);
   assert.doesNotMatch(html, /Grammar Suggestions/);
-=======
+});
+
 test("one compact personalisation tip appears only with completed grammar feedback", () => {
   const tip = "Measure words have come up again. Books use 本.";
   const review = { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
@@ -112,5 +112,48 @@ test("one compact personalisation tip appears only with completed grammar feedba
   assert.match(html, /Use 本 for books/);
   assert.doesNotMatch(render({ review: pending, personalisedTip: tip }), /Measure words have come up again/);
   assert.doesNotMatch(render({ review, stale: true, personalisedTip: tip }), /Measure words have come up again/);
->>>>>>> feature/personalisation
+});
+
+test("correct reviews have a single positive message without a repeated corrected sentence", () => {
+  const html = render({ review: { recognizedText: "我是学生。", correctedText: "我是学生。", issues: [], ocrConfidence: null } });
+  assert.match(html, /Your writing/);
+  assert.match(html, /Looks good/);
+  assert.equal((html.match(/lang="zh-Hans"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /Your learning tip|Confidence unavailable/);
+});
+
+test("multiple grammar choices retain issue selection and show one explanation at a time", () => {
+  const review = { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null, issues: [
+    { id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." },
+    { id: "two", type: "word_choice", start: 0, end: 1, original: "我", replacement: "你", explanation: "Second explanation shown on selection." },
+  ] };
+  const first = render({ review });
+  assert.match(first, /Choose a change/);
+  assert.match(first, /Use 本 for books/);
+  assert.doesNotMatch(first, /Second explanation/);
+  const second = render({ review, selectedIssueId: "two", onSelectIssue() {} });
+  assert.match(second, /Second explanation shown on selection/);
+  assert.doesNotMatch(second, /Use 本 for books/);
+  assert.match(second, /Show feedback for this character/);
+  assert.match(second, /bg-blue-200/);
+});
+
+test("long explanations stay behind closed details and learning tip follows correction in purple", () => {
+  const explanation = `Books use 本. ${"A longer supporting explanation. ".repeat(12)}`;
+  const html = render({ review: { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
+    issues: [{ id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation }] },
+    personalisedTip: "A reminder from learner memory." });
+  assert.match(html, /Books use 本/);
+  assert.match(html, /<details[^>]*><summary[^>]*>Explanation details/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  assert.match(html, /bg-violet-50/);
+  assert.ok(html.indexOf("Your writing") < html.indexOf("Suggested correction"));
+  assert.ok(html.indexOf("Suggested correction") < html.indexOf("Your learning tip"));
+});
+
+test("empty, loading and retry states remain concise and accessible", () => {
+  assert.match(render({ review: null }), /Write a Mandarin sentence to begin/);
+  assert.match(render({ review: null, loading: true }), /Analysing your writing/);
+  const failed = render({ review: null, error: "Please try again." });
+  assert.match(failed, /role="alert"/); assert.match(failed, /Try again/);
 });

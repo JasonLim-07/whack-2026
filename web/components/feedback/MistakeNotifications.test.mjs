@@ -51,3 +51,11 @@ test("resolved and removed entries remain in session history with their confirme
   assert.match(html, /User confirmed/); assert.match(html, /未/);
   assert.equal(render(MistakeWarnings, { history: archived }), "");
 });
+
+test("handwriting details and history are collapsed by default, without an empty diagnostics section", () => {
+  const html = render(Notifications, { history, onNavigate() {} });
+  assert.match(html, /^<details/);
+  assert.doesNotMatch(html, /<details[^>]* open/);
+  assert.match(html, /Handwriting checks and session history/);
+  assert.equal(render(Notifications, { history: emptyMistakeHistory() }), "");
+});
