@@ -6,6 +6,8 @@ import {
 } from "./pngUtils.js";
 
 const DEFAULT_MODEL = process.env.GEMINI_OCR_MODEL || "gemini-2.5-flash";
+const DEFAULT_PROVIDER = process.env.OCR_PROVIDER || "auto"; // "vision", "gemini", or "auto"
+const DEFAULT_UNCERTAINTY_THRESHOLD = 0.8;
 const MAX_CACHE_ENTRIES = 50;
 const transcriptionCache = new Map();
 
@@ -32,7 +34,8 @@ const OCR_RESPONSE_SCHEMA = {
         properties: {
           character: {
             type: "STRING",
-            description: "The single Chinese character or punctuation mark at this position.",
+            description:
+              "The single Chinese character or punctuation mark at this position.",
           },
           confidence: {
             type: "NUMBER",
@@ -69,6 +72,8 @@ const OCR_RESPONSE_SCHEMA = {
 function getApiKey(options = {}) {
   return (
     options.apiKey ||
+    process.env.GOOGLE_CLOUD_VISION_API_KEY ||
+    process.env.GOOGLE_VISION_API_KEY ||
     process.env.GEMINI_OCR_API_KEY ||
     process.env.GEMINI_API_KEY ||
     process.env.GOOGLE_API_KEY ||
@@ -76,18 +81,57 @@ function getApiKey(options = {}) {
   );
 }
 
-function getCacheKey(base64, language, model) {
+function getCacheKey(base64, language, provider, model, uncertaintyThreshold) {
   return crypto
     .createHash("sha256")
-    .update(`${model}:${language}:${base64}`)
+    .update(
+      `${provider}:${model}:${language}:${uncertaintyThreshold}:${base64}`
+    )
     .digest("hex");
 }
 
-function clampConfidence(value, fallback = 0.9) {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    return fallback;
+/**
+ * Parses a confidence score in [0, 1] without fabricating values when missing.
+ * Returns null if the provider did not supply a numeric confidence score.
+ */
+export function parseConfidence(value) {
+  if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) {
+    return null;
   }
   return Math.round(Math.min(1, Math.max(0, value)) * 100) / 100;
+}
+
+/**
+ * Converts Google Cloud Vision boundingPoly vertices [{x, y}, ...] into { x, y, width, height }.
+ */
+function verticesToBounds(vertices) {
+  if (!Array.isArray(vertices) || vertices.length === 0) {
+    return undefined;
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const v of vertices) {
+    const vx = typeof v?.x === "number" ? v.x : 0;
+    const vy = typeof v?.y === "number" ? v.y : 0;
+    if (vx < minX) minX = vx;
+    if (vy < minY) minY = vy;
+    if (vx > maxX) maxX = vx;
+    if (vy > maxY) maxY = vy;
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    return undefined;
+  }
+
+  return {
+    x: Math.max(0, Math.round(minX)),
+    y: Math.max(0, Math.round(minY)),
+    width: Math.max(4, Math.round(maxX - minX)),
+    height: Math.max(4, Math.round(maxY - minY)),
+  };
 }
 
 /**
@@ -119,10 +163,6 @@ function box2dToBounds(box2d, canvasWidth, canvasHeight) {
 
 /**
  * Resolves flexible caller inputs into a normalized image + optional stroke metadata.
- * Accepts:
- *   - string (base64 or data:image/png;base64,...)
- *   - Buffer / Uint8Array
- *   - { image, imageBase64, png, writing, strokes, canvas, language }
  */
 export function prepareRecognitionInput(input) {
   if (!input) {
@@ -132,7 +172,11 @@ export function prepareRecognitionInput(input) {
     throw err;
   }
 
-  if (typeof input === "string" || Buffer.isBuffer(input) || input instanceof Uint8Array) {
+  if (
+    typeof input === "string" ||
+    Buffer.isBuffer(input) ||
+    input instanceof Uint8Array
+  ) {
     const image = normalizeImageInput(input);
     return {
       image,
@@ -197,9 +241,133 @@ export function prepareRecognitionInput(input) {
 }
 
 /**
- * Calls Google AI Studio (Gemini Vision API) to perform literal Chinese handwriting OCR.
+ * Calls Google Cloud Vision API (DOCUMENT_TEXT_DETECTION with Chinese handwriting hints).
+ * Extracts per-symbol characters, genuine provider confidence scores (or null), and pixel bounding boxes.
  */
-async function callGeminiVisionOcr({
+export async function callCloudVisionOcr({
+  base64,
+  language = "zh",
+  apiKey,
+  fetchImpl = fetch,
+}) {
+  const endpoint = `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(
+    apiKey
+  )}`;
+
+  const languageHints =
+    language === "zh"
+      ? ["zh-t-i0-handwrit", "zh", "zh-Hans", "zh-Hant"]
+      : [language];
+
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: [
+        {
+          image: { content: base64 },
+          features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+          imageContext: { languageHints },
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const status = response.status;
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      detail = errJson?.error?.message || "";
+    } catch {
+      // Ignore parse error
+    }
+    const err = new Error(
+      status === 429
+        ? "Cloud Vision rate limit reached. Please wait a moment and try again."
+        : `Google Cloud Vision API returned HTTP ${status}${detail ? `: ${detail}` : ""}.`
+    );
+    err.code = status === 429 ? "RATE_LIMITED" : "PROVIDER_ERROR";
+    err.status = status === 429 ? 429 : 502;
+    throw err;
+  }
+
+  const payload = await response.json();
+  if (!Array.isArray(payload?.responses)) {
+    const err = new Error("Unexpected Cloud Vision response payload.");
+    err.code = "PROVIDER_ERROR";
+    err.status = 502;
+    throw err;
+  }
+  const firstResponse = payload.responses[0] || {};
+
+  if (firstResponse.error) {
+    const err = new Error(
+      `Google Cloud Vision error: ${firstResponse.error.message || "Unknown error"}`
+    );
+    err.code = "PROVIDER_ERROR";
+    err.status = 502;
+    throw err;
+  }
+
+  const fullText = firstResponse.fullTextAnnotation;
+  if (!fullText) {
+    return {
+      provider: "google-cloud-vision",
+      characters: [],
+      transcription: "",
+      overallConfidence: null,
+    };
+  }
+
+  const characters = [];
+  const pages = Array.isArray(fullText.pages) ? fullText.pages : [];
+
+  for (const page of pages) {
+    for (const block of page.blocks || []) {
+      for (const paragraph of block.paragraphs || []) {
+        for (const word of paragraph.words || []) {
+          for (const symbol of word.symbols || []) {
+            const ch = (symbol.text || "").trim();
+            if (!ch) continue;
+            characters.push({
+              character: ch,
+              confidence: parseConfidence(symbol.confidence),
+              bounds: verticesToBounds(symbol.boundingBox?.vertices),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  const transcription =
+    characters.map((c) => c.character).join("") ||
+    (fullText.text || "").replace(/\s+/g, "");
+
+  const validConfidences = characters
+    .map((c) => c.confidence)
+    .filter((c) => typeof c === "number");
+
+  const overallConfidence =
+    validConfidences.length > 0
+      ? validConfidences.reduce((sum, c) => sum + c, 0) / validConfidences.length
+      : null;
+
+  return {
+    provider: "google-cloud-vision",
+    characters,
+    transcription,
+    overallConfidence,
+  };
+}
+
+/**
+ * Calls Google AI Studio / Gemini Vision API to perform literal Chinese handwriting OCR.
+ */
+export async function callGeminiVisionOcr({
   base64,
   mimeType,
   strokeClusters,
@@ -255,10 +423,17 @@ Return each physical character in reading order inside "characters", and the exa
 
   if (!response.ok) {
     const status = response.status;
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      detail = errJson?.error?.message || "";
+    } catch {
+      // Ignore parse error
+    }
     const err = new Error(
       status === 429
         ? "Recognition rate limit reached. Please wait a moment and try again."
-        : `Recognition provider returned HTTP ${status}.`
+        : `Gemini API returned HTTP ${status}${detail ? `: ${detail}` : ""}.`
     );
     err.code = status === 429 ? "RATE_LIMITED" : "PROVIDER_ERROR";
     err.status = status === 429 ? 429 : 502;
@@ -266,8 +441,7 @@ Return each physical character in reading order inside "characters", and the exa
   }
 
   const payload = await response.json();
-  const rawText =
-    payload?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const rawText = payload?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
   if (!rawText) {
     const err = new Error("Recognition model returned an empty response.");
@@ -277,7 +451,11 @@ Return each physical character in reading order inside "characters", and the exa
   }
 
   try {
-    return JSON.parse(rawText);
+    const parsed = JSON.parse(rawText);
+    return {
+      ...parsed,
+      provider: "gemini-vision",
+    };
   } catch {
     const err = new Error("Failed to parse JSON from recognition model.");
     err.code = "PROVIDER_ERROR";
@@ -286,84 +464,284 @@ Return each physical character in reading order inside "characters", and the exa
   }
 }
 
+const CJK_CHAR_REGEX = /[\u4e00-\u9fff\u3400-\u4dbf]/;
+const DIGIT_REGEX = /^[0-9]$/;
+const ASCII_ALNUM_REGEX = /^[0-9A-Za-z]$/;
+
+/**
+ * Checks whether an ASCII punctuation mark at index `idx` should be normalized to full-width
+ * Chinese punctuation based on its immediate neighbors.
+ * Prevents corrupting decimals ("3.5"), thousands ("1,000"), ellipses ("..."), or English text.
+ */
+function normalizeContextualChinesePunctuation(charText, idx, filteredRawChars) {
+  const prevChar = idx > 0 ? filteredRawChars[idx - 1].character.trim() : "";
+  const nextChar =
+    idx + 1 < filteredRawChars.length
+      ? filteredRawChars[idx + 1].character.trim()
+      : "";
+
+  // Never normalize "." or "," when adjacent to digits on both sides (e.g. "3.5", "1,000")
+  if (
+    (charText === "." || charText === ",") &&
+    DIGIT_REGEX.test(prevChar) &&
+    DIGIT_REGEX.test(nextChar)
+  ) {
+    return charText;
+  }
+
+  // Never normalize consecutive periods ("..." ellipsis)
+  if (charText === "." && (prevChar === "." || nextChar === ".")) {
+    return charText;
+  }
+
+  // Only normalize if adjacent to a Chinese character (or Chinese punctuation)
+  const hasCjkNeighbor =
+    CJK_CHAR_REGEX.test(prevChar) || CJK_CHAR_REGEX.test(nextChar);
+  if (!hasCjkNeighbor) {
+    return charText;
+  }
+
+  if (charText === ".") return "。";
+  if (charText === ",") return "，";
+  if (charText === "?") return "？";
+  if (charText === "!") return "！";
+  return charText;
+}
+
+/**
+ * Decides whether a recognized "0" or "O" has strong supporting evidence to be disambiguated to "口":
+ * 1. Exact 1-to-1 alignment between strokeClusters and recognized symbols (so stroke count is reliable).
+ * 2. Cluster has 3 or 4 strokes (Arabic 0 / letter O is written in 1 loop; Chinese 口 has 3 strokes).
+ * 3. Cluster bounding box has roughly square proportions (aspect ratio between 0.55 and 1.65).
+ * 4. Immediate neighbors include Chinese characters and NO adjacent digits or Latin letters
+ *    (so "10", "100", "2026", "OK", "H2O" are never altered).
+ * 5. Provider confidence on "0"/"O" is low (< 0.85) or missing.
+ */
+function shouldDisambiguateZeroToKou({
+  charText,
+  idx,
+  filteredRawChars,
+  matchedCluster,
+  clustersAligned,
+  providerConfidence,
+}) {
+  if (charText !== "0" && charText !== "O" && charText !== "o") {
+    return false;
+  }
+  if (!clustersAligned || !matchedCluster) {
+    return false;
+  }
+
+  const strokeCount = matchedCluster.strokeIds?.length ?? 0;
+  if (strokeCount < 3 || strokeCount > 4) {
+    return false;
+  }
+
+  const bounds = matchedCluster.bounds;
+  if (bounds && bounds.height > 0) {
+    const aspect = bounds.width / bounds.height;
+    if (aspect < 0.55 || aspect > 1.65) {
+      return false;
+    }
+  }
+
+  // If the OCR provider is highly confident (>= 0.85) that it is a "0", trust the provider
+  if (typeof providerConfidence === "number" && providerConfidence >= 0.85) {
+    return false;
+  }
+
+  const prevChar = idx > 0 ? filteredRawChars[idx - 1].character.trim() : "";
+  const nextChar =
+    idx + 1 < filteredRawChars.length
+      ? filteredRawChars[idx + 1].character.trim()
+      : "";
+
+  // Never convert if adjacent to digits or Latin letters (e.g. "10个人", "2026年", "HSK0")
+  if (ASCII_ALNUM_REGEX.test(prevChar) || ASCII_ALNUM_REGEX.test(nextChar)) {
+    return false;
+  }
+
+  // Require at least one immediate CJK neighbor
+  return CJK_CHAR_REGEX.test(prevChar) || CJK_CHAR_REGEX.test(nextChar);
+}
+
 /**
  * Normalizes the raw model output and pairs recognized characters with stroke clusters / bounds.
+ * Preserves original provider characters, original transcription, and genuine confidence scores (null if absent).
  */
 export function normalizeOcrResult(
   rawModelResult,
-  { strokeClusters = [], canvas = { width: 800, height: 400 }, language = "zh" } = {}
+  {
+    strokeClusters = [],
+    canvas = { width: 800, height: 400 },
+    language = "zh",
+    uncertaintyThreshold = DEFAULT_UNCERTAINTY_THRESHOLD,
+    provider = rawModelResult?.provider || "google-cloud-vision",
+  } = {}
 ) {
   const rawChars = Array.isArray(rawModelResult?.characters)
     ? rawModelResult.characters
     : [];
 
-  const characters = rawChars
-    .filter((item) => typeof item?.character === "string" && item.character.trim().length > 0)
-    .map((item, idx) => {
-      const charText = item.character.trim();
-      const confidence = clampConfidence(item.confidence, 0.9);
-      const matchedCluster =
-        strokeClusters.length === rawChars.length
-          ? strokeClusters[idx]
-          : strokeClusters[idx] || null;
+  const filteredRawChars = rawChars.filter(
+    (item) =>
+      typeof item?.character === "string" && item.character.trim().length > 0
+  );
 
-      const bounds =
-        matchedCluster?.bounds ||
-        box2dToBounds(item.box2d, canvas.width, canvas.height);
+  const hasChineseChar = filteredRawChars.some((item) =>
+    CJK_CHAR_REGEX.test(item.character)
+  );
 
-      const entry = {
+  // Stroke cluster counts are only guaranteed 1-to-1 with OCR symbols when lengths match
+  const clustersAligned =
+    strokeClusters.length > 0 &&
+    strokeClusters.length === filteredRawChars.length;
+
+  const uncertainCharacters = [];
+
+  const characters = filteredRawChars.map((item, idx) => {
+    const originalCharacter = item.character.trim();
+    let charText = originalCharacter;
+
+    const matchedCluster = clustersAligned ? strokeClusters[idx] : null;
+    const confidence = parseConfidence(item.confidence);
+    let postProcessingReason = null;
+
+    if (language === "zh" && hasChineseChar) {
+      const punctNormalized = normalizeContextualChinesePunctuation(
+        charText,
+        idx,
+        filteredRawChars
+      );
+      if (punctNormalized !== charText) {
+        charText = punctNormalized;
+        postProcessingReason = "punctuation_normalized";
+      } else if (
+        shouldDisambiguateZeroToKou({
+          charText,
+          idx,
+          filteredRawChars,
+          matchedCluster,
+          clustersAligned,
+          providerConfidence: confidence,
+        })
+      ) {
+        charText = "口";
+        postProcessingReason = "disambiguated_zero_to_kou";
+      }
+    }
+
+    const bounds =
+      item.bounds ||
+      matchedCluster?.bounds ||
+      box2dToBounds(item.box2d, canvas.width, canvas.height);
+
+    const lowConfidence =
+      confidence === null || confidence < uncertaintyThreshold;
+    const wasDisambiguated =
+      postProcessingReason === "disambiguated_zero_to_kou";
+    const hasFormIssue = Boolean(
+      typeof item.formNote === "string" && item.formNote.trim()
+    );
+    const uncertain = Boolean(
+      lowConfidence || wasDisambiguated || hasFormIssue
+    );
+
+    const entry = {
+      character: charText,
+      originalCharacter,
+      confidence,
+      uncertain,
+    };
+
+    if (postProcessingReason) {
+      entry.normalized = true;
+      entry.normalizationReason = postProcessingReason;
+    }
+    if (bounds) {
+      entry.bounds = bounds;
+    }
+    if (matchedCluster?.strokeIds?.length) {
+      entry.strokeIds = matchedCluster.strokeIds;
+    }
+    if (hasFormIssue) {
+      entry.formNote = item.formNote.trim();
+    }
+
+    if (uncertain) {
+      let reason = "low_confidence";
+      if (confidence === null) reason = "missing_confidence";
+      else if (wasDisambiguated) reason = "disambiguated_from_zero";
+      else if (hasFormIssue) reason = "form_note";
+
+      uncertainCharacters.push({
+        index: idx,
         character: charText,
+        originalCharacter,
         confidence,
-      };
+        reason,
+      });
+    }
 
-      if (bounds) {
-        entry.bounds = bounds;
-      }
-      if (matchedCluster?.strokeIds?.length) {
-        entry.strokeIds = matchedCluster.strokeIds;
-      }
-      if (typeof item.formNote === "string" && item.formNote.trim()) {
-        entry.formNote = item.formNote.trim();
-      }
+    return entry;
+  });
 
-      return entry;
-    });
-
-  // Always build the literal transcription from the extracted character slots first
-  // so the model cannot silently insert a missing word in the sentence string.
+  const originalSlotText = characters.map((c) => c.originalCharacter).join("");
   const slotTranscription = characters.map((c) => c.character).join("");
-  const transcription =
+
+  const originalText =
+    originalSlotText ||
+    (typeof rawModelResult?.transcription === "string"
+      ? rawModelResult.transcription.trim()
+      : "");
+
+  const text =
     slotTranscription ||
     (typeof rawModelResult?.transcription === "string"
       ? rawModelResult.transcription.trim()
       : "");
 
-  const avgConfidence =
-    characters.length > 0
-      ? characters.reduce((sum, c) => sum + c.confidence, 0) / characters.length
-      : rawModelResult?.overallConfidence ?? 0;
+  const numericConfidences = characters
+    .map((c) => c.confidence)
+    .filter((c) => typeof c === "number");
+
+  let overallConfidence = parseConfidence(rawModelResult?.overallConfidence);
+  if (numericConfidences.length > 0) {
+    const avg =
+      numericConfidences.reduce((sum, c) => sum + c, 0) /
+      numericConfidences.length;
+    overallConfidence = parseConfidence(avg);
+  } else if (characters.length === 0) {
+    overallConfidence = 0;
+  }
 
   return {
     success: true,
-    transcription,
+    text,
+    originalText,
+    transcription: text,
     language,
-    confidence: clampConfidence(
-      rawModelResult?.overallConfidence ?? avgConfidence,
-      clampConfidence(avgConfidence, 0)
-    ),
+    confidence: overallConfidence,
+    provider,
     characters,
+    uncertainCharacters,
   };
 }
 
 /**
  * Main handwriting recognition function.
- * Accepts a PNG image (base64, data URL, or Buffer) or a handwriting snapshot object,
- * and returns the literal Chinese transcription + character-level metadata.
+ * Supports both Google Cloud Vision API (DOCUMENT_TEXT_DETECTION with zh-t-i0-handwrit)
+ * and Gemini Vision API, returning literal Chinese transcription + character-level metadata.
  */
 export async function transcribeHandwriting(input, options = {}) {
   const { image, strokes, canvas, language } = prepareRecognitionInput(input);
   const strokeClusters = clusterStrokesIntoCharacters(strokes);
   const model = options.model || DEFAULT_MODEL;
+  const provider = (options.provider || DEFAULT_PROVIDER).toLowerCase();
+  const uncertaintyThreshold =
+    typeof options.uncertaintyThreshold === "number"
+      ? options.uncertaintyThreshold
+      : DEFAULT_UNCERTAINTY_THRESHOLD;
 
   // Support explicit mock responses for unit tests or offline UI development
   if (options.mockResult) {
@@ -371,10 +749,18 @@ export async function transcribeHandwriting(input, options = {}) {
       strokeClusters,
       canvas,
       language,
+      uncertaintyThreshold,
+      provider: options.mockResult.provider || "mock",
     });
   }
 
-  const cacheKey = getCacheKey(image.base64, language, model);
+  const cacheKey = getCacheKey(
+    image.base64,
+    language,
+    provider,
+    model,
+    uncertaintyThreshold
+  );
   if (!options.skipCache && transcriptionCache.has(cacheKey)) {
     return transcriptionCache.get(cacheKey);
   }
@@ -382,27 +768,65 @@ export async function transcribeHandwriting(input, options = {}) {
   const apiKey = getApiKey(options);
   if (!apiKey) {
     const err = new Error(
-      "Missing Google AI Studio API key. Set GEMINI_OCR_API_KEY or GEMINI_API_KEY in web/.env.local."
+      "Missing Google API key. Set GEMINI_OCR_API_KEY or GOOGLE_CLOUD_VISION_API_KEY in web/.env.local."
     );
     err.code = "MISSING_API_KEY";
     err.status = 500;
     throw err;
   }
 
-  const rawModelResult = await callGeminiVisionOcr({
-    base64: image.base64,
-    mimeType: image.mimeType,
-    strokeClusters,
-    language,
-    model,
-    apiKey,
-    fetchImpl: options.fetchImpl,
-  });
+  let rawModelResult;
+
+  if (provider === "vision" || provider === "cloud-vision") {
+    rawModelResult = await callCloudVisionOcr({
+      base64: image.base64,
+      language,
+      apiKey,
+      fetchImpl: options.fetchImpl,
+    });
+  } else if (provider === "gemini") {
+    rawModelResult = await callGeminiVisionOcr({
+      base64: image.base64,
+      mimeType: image.mimeType,
+      strokeClusters,
+      language,
+      model,
+      apiKey,
+      fetchImpl: options.fetchImpl,
+    });
+  } else {
+    // "auto": Try Google Cloud Vision API first, then fall back to Gemini Vision if configured
+    try {
+      rawModelResult = await callCloudVisionOcr({
+        base64: image.base64,
+        language,
+        apiKey,
+        fetchImpl: options.fetchImpl,
+      });
+    } catch (visionErr) {
+      if (visionErr.status === 429) throw visionErr;
+      try {
+        rawModelResult = await callGeminiVisionOcr({
+          base64: image.base64,
+          mimeType: image.mimeType,
+          strokeClusters,
+          language,
+          model,
+          apiKey,
+          fetchImpl: options.fetchImpl,
+        });
+      } catch {
+        throw visionErr;
+      }
+    }
+  }
 
   const result = normalizeOcrResult(rawModelResult, {
     strokeClusters,
     canvas,
     language,
+    uncertaintyThreshold,
+    provider: rawModelResult?.provider || "google-cloud-vision",
   });
 
   if (transcriptionCache.size >= MAX_CACHE_ENTRIES) {
