@@ -95,13 +95,13 @@ test("visual warning reuses character choices without claiming a stroke mistake"
   assert.match(panel, /disabled=""/);
 });
 
-<<<<<<< HEAD
 test("uncertain handwriting has typed emphasis and a focusable correction target before grammar", () => {
   const html = render({ review: pending, selectedIssueId: "mistake-1", reviewHighlights: [{ id: "mistake-1", start: 3, end: 4 }] });
   assert.match(html, /<mark/); assert.match(html, /bg-blue-200/);
   assert.match(html, /id="character-choice-3" tabindex="-1"/);
   assert.doesNotMatch(html, /Grammar Suggestions/);
-=======
+});
+
 test("one compact personalisation tip appears only with completed grammar feedback", () => {
   const tip = "Measure words have come up again. Books use 本.";
   const review = { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
@@ -112,5 +112,4 @@ test("one compact personalisation tip appears only with completed grammar feedba
   assert.match(html, /Use 本 for books/);
   assert.doesNotMatch(render({ review: pending, personalisedTip: tip }), /Measure words have come up again/);
   assert.doesNotMatch(render({ review, stale: true, personalisedTip: tip }), /Measure words have come up again/);
->>>>>>> feature/personalisation
 });
