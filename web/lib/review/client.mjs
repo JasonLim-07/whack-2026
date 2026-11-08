@@ -1,3 +1,4 @@
+import { validIssueCategory } from "../learning/categories.mjs";
 import { isLatinOnlyText, CHINESE_TEXT_MESSAGE } from "./text.mjs";
 import { validTextRange, validOcrCharacters } from "./locations.mjs";
 
@@ -60,7 +61,7 @@ export function validateReview(review, revision) {
   const ids = new Set();
   for (const issue of review.issues) {
     if (!issue || typeof issue.id !== "string" || !issue.id || ids.has(issue.id) ||
-      !["grammar", "word_choice", "character"].includes(issue.type) ||
+      !["grammar", "word_choice", "character"].includes(issue.type) || !validIssueCategory(issue) ||
       ![issue.original, issue.replacement, issue.explanation].every((value) => typeof value === "string")) {
       throw new Error(INVALID_RESPONSE);
     }

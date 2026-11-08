@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
+import { createLearnerMemory } from "@/lib/learning/memory.mjs";
 import { handwritingHighlights } from "@/lib/review/locations.mjs";
 import { createReviewRunner, getConfirmedText, restoreConfirmedLocations } from "@/lib/review/client.mjs";
 import { emptyMistakeHistory, mistakeReducer, mistakeOverlays } from "@/lib/review/mistakes.mjs";
@@ -28,6 +29,9 @@ export default function WritingWorkspace() {
     retryRegion: (...args) => checkerRef.current?.retryRegion(...args),
   }), []);
   const editingRef = useRef(false);
+  const learnerMemoryRef = useRef(null);
+  const learnerSessionRef = useRef(null);
+  const [personalisedTip, setPersonalisedTip] = useState(null);
   const [hasInk, setHasInk] = useState(false);
   const [loading, setLoading] = useState(false);
   const [review, setReview] = useState(null);
@@ -86,6 +90,7 @@ export default function WritingWorkspace() {
     setReview(null);
     setSnapshotBounds(null);
     setSelectedIssueId(null);
+    setPersonalisedTip(null);
     setError(null);
     setSelections({});
     setConfirmedText("");
@@ -130,6 +135,7 @@ export default function WritingWorkspace() {
         pendingRef.current = true;
         setLoading(true);
         setSelectedIssueId(null);
+        setPersonalisedTip(null);
         if (!confirming) {
           setSelectedMistakeId(null);
           setSnapshotBounds(null);
@@ -154,6 +160,12 @@ export default function WritingWorkspace() {
           : result;
         reviewRef.current = locatedResult;
         setReview(locatedResult);
+        if (locatedResult.requiresVerification !== true) {
+          learnerMemoryRef.current ??= createLearnerMemory();
+          learnerSessionRef.current ??= crypto.randomUUID();
+          learnerMemoryRef.current.recordCompletedReview(locatedResult, { sessionId: learnerSessionRef.current, revision });
+          setPersonalisedTip(learnerMemoryRef.current.getPersonalisedTip(locatedResult));
+        }
         setSelections({});
         setConfirmedText(result.recognizedText);
         setIntentDescriptions({});
@@ -285,6 +297,10 @@ export default function WritingWorkspace() {
           <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk && !editing} onReview={handleReview}
             reviewHighlights={history.occurrences.filter((entry) => entry.sourceReview === review && entry.detected).map((entry) => ({ id: entry.id, start: entry.start, end: entry.end }))}
             selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId}
+            personalisedTip={personalisedTip} onResetHistory={() => {
+              learnerMemoryRef.current?.resetLearningHistory();
+              setPersonalisedTip(null);
+            }}
             selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
             confirmedText={confirmedText} onEditText={setConfirmedText} suggesting={suggesting}
             intentDescriptions={intentDescriptions} intentSuggestions={intentSuggestions} onSuggest={handleSuggest}
