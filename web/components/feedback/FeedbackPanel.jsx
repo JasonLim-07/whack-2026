@@ -1,22 +1,63 @@
-﻿"use client";
+"use client";
 
 import { textHighlights } from "@/lib/review/locations.mjs";
 
 const typeLabels = { grammar: "Grammar", word_choice: "Word choice", character: "Character usage" };
 
-export default function FeedbackPanel({ review, loading, error, onReview, stale = false, canReview = true, selectedIssueId = null, onSelectIssue }) {
+function CharacterVerification({ review, selections, onSelectCharacter, onConfirm }) {
+  const complete = review.characterCandidates.every((candidate) =>
+    candidate.options.some(({ char }) => char === selections[candidate.position]));
+  const preview = Array.from(review.recognizedText);
+  for (const candidate of review.characterCandidates) {
+    if (selections[candidate.position] !== undefined) preview[candidate.position] = selections[candidate.position];
+  }
+  return (
+    <section aria-labelledby="verify-text-heading" className="space-y-4">
+      <h3 id="verify-text-heading" className="font-medium text-neutral-800">Confirm your writing</h3>
+      <p className="text-neutral-600">Choose the character you intended at each marked position, including the original if it is right. These are heuristic suggestions using character similarity and context; they can be wrong. Grammar review starts only after you confirm.</p>
+      {review.characterCandidates.map((candidate) => (
+        <fieldset key={candidate.position} className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+          <legend className="px-1 font-medium">Character {candidate.position + 1}: <span lang="zh-Hans">{candidate.originalAttempt}</span></legend>
+          <div className="flex flex-wrap gap-2">
+            {candidate.options.map((option) => (
+              <label key={option.char} className="flex cursor-pointer items-center gap-2 rounded-md border border-neutral-200 bg-white px-3 py-2 has-checked:border-neutral-800 has-checked:bg-neutral-100">
+                <input type="radio" name={`character-${candidate.position}`} value={option.char}
+                  checked={selections[candidate.position] === option.char}
+                  onChange={() => onSelectCharacter(candidate.position, option.char)} className="accent-neutral-900" />
+                <span lang="zh-Hans" className="text-xl">{option.char}</span>
+                {option.char === candidate.originalAttempt && <span className="text-xs text-neutral-500">as written</span>}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ))}
+      <div>
+        <p className="mb-2 font-medium">Text to confirm</p>
+        <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{preview.join("")}</p>
+      </div>
+      <button type="button" disabled={!complete} onClick={onConfirm}
+        className="rounded-lg bg-neutral-900 px-4 py-2 font-medium text-white hover:bg-neutral-800 focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-40">Confirm text and review</button>
+      {!complete && <p className="text-xs text-neutral-500">Select an option for every uncertain character to continue.</p>}
+    </section>
+  );
+}
+
+export default function FeedbackPanel({ review, loading, error, onReview, stale = false, canReview = true,
+  selections = {}, onSelectCharacter, onConfirm, selectedIssueId = null, onSelectIssue }) {
+  const verifying = review?.requiresVerification === true;
   return (
     <div className="space-y-6 text-sm leading-6" aria-busy={loading}>
-      {loading ? (
-        <div role="status" className="rounded-lg bg-neutral-50 p-4 text-neutral-600">
-          Reviewing your handwriting… Recognition and grammar analysis may take a moment. You can keep writing. Changes cancel this review.
-        </div>
-      ) : error ? (
+      {error && !loading && (
         <div role="alert" className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-950">
           <p>{error}</p>
-          <button type="button" disabled={!canReview} onClick={onReview} className="rounded-md border border-amber-300 px-3 py-1 font-medium disabled:opacity-40">Try again</button>
+          {!verifying && <button type="button" disabled={!canReview} onClick={onReview} className="rounded-md border border-amber-300 px-3 py-1 font-medium disabled:opacity-40">Try again</button>}
         </div>
-      ) : stale ? (
+      )}
+      {loading ? (
+        <div role="status" className="rounded-lg bg-neutral-50 p-4 text-neutral-600">
+          {verifying ? "Reviewing your confirmed text…" : "Reviewing your handwriting… Recognition and grammar analysis may take a moment."} You can keep writing. Changes cancel this review.
+        </div>
+      ) : error && !verifying ? null : stale ? (
         <p role="status" className="text-neutral-600">Writing changed. Review again to update feedback.</p>
       ) : !review ? (
         <p className="text-neutral-500">Write a Mandarin sentence and review it to see feedback here.</p>
@@ -24,16 +65,17 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
         <>
           <section aria-labelledby="recognized-text-heading">
             <h3 id="recognized-text-heading" className="mb-2 font-medium text-neutral-800">Recognised Text</h3>
-            <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{textHighlights(review.recognizedText, review.issues).map((run) => run.issueIds.length ? (
+            <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg bg-neutral-50 p-3 text-lg leading-8">{textHighlights(review.recognizedText, review.issues ?? []).map((run) => run.issueIds.length ? (
               <mark key={run.key} aria-label={run.insertion ? "Suggested insertion" : undefined}
                 className={`rounded-sm ${run.issueIds.includes(selectedIssueId) ? "bg-blue-200 text-blue-950 ring-1 ring-blue-400" : "bg-blue-100 text-blue-950"}`}>
                 {run.text}
               </mark>
             ) : <span key={run.key}>{run.text}</span>)}</p>
             <p className="mt-2 text-xs text-neutral-500">
-              {review.ocrConfidence === null ? "Confidence unavailable." : `OCR confidence: ${(review.ocrConfidence * 100).toFixed(1)}% (provider-reported).`}
+              {review.ocrConfidence == null ? "Confidence unavailable." : `OCR confidence: ${(review.ocrConfidence * 100).toFixed(1)}% (provider-reported).`}
             </p>
           </section>
+          {verifying ? <CharacterVerification review={review} selections={selections} onSelectCharacter={onSelectCharacter} onConfirm={onConfirm} /> : <>
           <section aria-labelledby="corrected-text-heading">
             <h3 id="corrected-text-heading" className="mb-2 font-medium text-neutral-800">Suggested Text</h3>
             <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg border border-neutral-200 p-3 text-lg leading-8">{review.correctedText}</p>
@@ -61,6 +103,7 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
               </ul>
             )}
           </section>
+          </>}
           <p className="text-xs text-neutral-500">Recognition can misread handwriting. Compare the transcription with your original writing.</p>
         </>
       )}

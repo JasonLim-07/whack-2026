@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
 import { handwritingHighlights } from "@/lib/review/locations.mjs";
-import { createReviewRunner } from "@/lib/review/client.mjs";
+import { createReviewRunner, getConfirmedText } from "@/lib/review/client.mjs";
 
 export default function WritingWorkspace() {
   const canvasRef = useRef(null);
@@ -23,6 +23,7 @@ export default function WritingWorkspace() {
   const [snapshotBounds, setSnapshotBounds] = useState(null);
   const [selectedIssueId, setSelectedIssueId] = useState(null);
   const highlights = useMemo(() => handwritingHighlights(review, snapshotBounds), [review, snapshotBounds]);
+  const [selections, setSelections] = useState({});
   // null uses responsive CSS: open on desktop, closed on smaller screens.
   const [panelOpen, setPanelOpen] = useState(null);
 
@@ -46,6 +47,7 @@ export default function WritingWorkspace() {
     setSnapshotBounds(null);
     setSelectedIssueId(null);
     setError(null);
+    setSelections({});
   }, []);
 
   const handleEditStart = useCallback(() => {
@@ -65,32 +67,46 @@ export default function WritingWorkspace() {
     invalidateReview();
   }, [invalidateReview]);
 
-  function handleReview() {
+  function handleReview(text) {
+    // Button clicks pass an event; only a string confirms text.
+    const confirming = typeof text === "string";
     if (!drawingRef.current.hasInk || !canvasRef.current || editingRef.current) return;
     const revision = drawingRef.current.revision;
     runnerRef.current?.run({
       revision,
+      ...(confirming ? { text } : {}),
       exportSnapshot: () => canvasRef.current.exportSnapshot(),
       isCurrent: (submittedRevision) => !editingRef.current && drawingRef.current.revision === submittedRevision,
       onStart() {
         pendingRef.current = true;
         setLoading(true);
-        setSnapshotBounds(null);
         setSelectedIssueId(null);
-        reviewRef.current = null;
-        setReview(null);
+        if (!confirming) {
+          setSnapshotBounds(null);
+          reviewRef.current = null;
+          setReview(null);
+          setSelections({});
+        }
         setError(null);
         setStale(false);
         setPanelOpen(true);
       },
       onSuccess(result, snapshot) {
-        setSnapshotBounds(snapshot.bounds);
+        if (snapshot) setSnapshotBounds(snapshot.bounds);
         reviewRef.current = result;
         setReview(result);
+        setSelections({});
       },
       onError: setError,
       onFinish: () => { pendingRef.current = false; setLoading(false); },
     });
+  }
+
+  function handleConfirm() {
+    const current = reviewRef.current;
+    if (!current?.requiresVerification || current.revision !== drawingRef.current.revision) return;
+    try { handleReview(getConfirmedText(current, selections)); }
+    catch (confirmationError) { setError(confirmationError.message); }
   }
 
   function closePanel() {
@@ -130,7 +146,10 @@ export default function WritingWorkspace() {
             <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Writing Review</h2>
             <button type="button" onClick={closePanel} aria-label="Collapse Writing Review" className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-100 focus-visible:outline-2">Collapse</button>
           </div>
-          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk} onReview={handleReview} selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId} />
+          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk && !editing} onReview={handleReview}
+            selectedIssueId={selectedIssueId} onSelectIssue={setSelectedIssueId}
+            selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
+            onConfirm={handleConfirm} />
         </aside>
       </div>
     </main>

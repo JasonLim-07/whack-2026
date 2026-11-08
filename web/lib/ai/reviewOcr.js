@@ -1,4 +1,4 @@
-﻿import { Buffer } from "node:buffer";
+import { Buffer } from "node:buffer";
 import { recogniseHandwriting as transcribeHandwriting } from "./ocr.js";
 import { validBounds } from "../review/locations.mjs";
 
@@ -16,6 +16,7 @@ export function readPngDimensions(imageBuffer) {
 }
 
 function characterLocations(result, dimensions) {
+  if (!Array.isArray(result.characters)) return [];
   if (result.characters.some((character) => typeof character?.originalCharacter !== "string" || !character.originalCharacter) ||
     result.characters.map((character) => character.originalCharacter).join("") !== result.originalText) return [];
   let cursor = 0;
@@ -36,13 +37,19 @@ function characterLocations(result, dimensions) {
 
 /** Preserve original OCR text and pixel geometry, without normalised corrections. */
 export function normaliseReviewOcrResult(result, dimensions) {
-  if (result?.success !== true || typeof result.originalText !== "string" || !Array.isArray(result.characters)) {
+  if (!["SUCCESS", "LOW_CONFIDENCE", "UNREADABLE"].includes(result?.status) ||
+      typeof result.text !== "string" || !Array.isArray(result.characterCandidates)) {
     throw new Error("Recognition provider returned an invalid transcription result.");
   }
   return {
-    text: result.originalText,
+    text: result.originalText ?? result.text,
+    status: result.status,
+    requiresVerification: result.requiresVerification,
+    characterCandidates: result.characterCandidates,
+    // The overall OCR score is derived, and Gemini scores are self-ratings.
+    // Only Cloud Vision's reported segment scores are exposed as confidence.
     confidence: null,
-    segments: result.characters.map((character) => ({
+    segments: (result.characters || []).map((character) => ({
       text: character.originalCharacter,
       confidence: result.provider === "google-cloud-vision" ? character.confidence : null,
     })),

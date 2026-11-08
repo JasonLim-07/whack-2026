@@ -42,6 +42,11 @@ test("text runs support overlapping issues and zero-length insertions without lo
   assert.deepEqual(runs[3], { key: "insert-3", text: "│", insertion: true, issueIds: ["insert"] });
 });
 
+test("verification responses have no grammar overlays before confirmation", () => {
+  const review = { recognizedText: text, requiresVerification: true, ocrCharacters: characters };
+  assert.deepEqual(handwritingHighlights(review, { left: -200, top: -100 }), []);
+});
+
 test("grammar overlays share transforms, restore state and render before permanent ink", () => {
   for (const zoom of [0.25, 1]) {
     const calls = [];

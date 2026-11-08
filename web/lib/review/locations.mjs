@@ -27,7 +27,7 @@ export function validOcrCharacters(characters, text) {
 export function handwritingHighlights(review, exportBounds) {
   if (!review || !exportBounds) return [];
   const characters = review.ocrCharacters || [];
-  return review.issues.flatMap((issue) => {
+  return (review.issues ?? []).flatMap((issue) => {
     // An insertion has no existing ink to highlight.
     if (issue.start === issue.end) return [];
     return characters.filter((character) => character.bounds && character.start < issue.end && character.end > issue.start)
