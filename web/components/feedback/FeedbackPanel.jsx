@@ -88,7 +88,7 @@ function CharacterVerification({ review, selections, onSelectCharacter, onConfir
 
 export default function FeedbackPanel({ review, loading, error, onReview, stale = false, canReview = true,
   selections = {}, onSelectCharacter, onConfirm, confirmedText = "", onEditText, suggesting = false,
-  intentDescriptions = {}, intentSuggestions = {}, onDescribe, onSuggest, selectedIssueId = null, onSelectIssue }) {
+  intentDescriptions = {}, intentSuggestions = {}, onDescribe, onSuggest, selectedIssueId = null, onSelectIssue, personalisedTip = null, onResetHistory }) {
   const verifying = review?.requiresVerification === true;
   return (
     <div className="space-y-6 text-sm leading-6" aria-busy={loading}>
@@ -124,6 +124,7 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
             ? <TextVerification value={confirmedText} onEdit={onEditText} onConfirm={onConfirm} />
             : <CharacterVerification review={review} selections={selections} onSelectCharacter={onSelectCharacter} onConfirm={onConfirm}
               intentDescriptions={intentDescriptions} intentSuggestions={intentSuggestions} onDescribe={onDescribe} onSuggest={onSuggest} /> : <>
+          {personalisedTip && <p role="note" className="rounded-lg bg-blue-50 p-3 text-blue-950">{personalisedTip}</p>}
           <section aria-labelledby="corrected-text-heading">
             <h3 id="corrected-text-heading" className="mb-2 font-medium text-neutral-800">Suggested Text</h3>
             <p lang="zh-Hans" className="whitespace-pre-wrap break-words rounded-lg border border-neutral-200 p-3 text-lg leading-8">{review.correctedText}</p>
@@ -152,6 +153,7 @@ export default function FeedbackPanel({ review, loading, error, onReview, stale 
             )}
           </section>
           </>}
+          {!verifying && onResetHistory && <button type="button" onClick={onResetHistory} className="text-xs text-neutral-500 underline underline-offset-2 focus-visible:outline-2">Reset learning history</button>}
           <p className="text-xs text-neutral-500">Recognition can misread handwriting. Compare the transcription with your original writing.</p>
         </>
       )}

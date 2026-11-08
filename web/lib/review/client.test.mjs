@@ -476,3 +476,24 @@ test("single-character confirmation preserves its box using Unicode code-point o
   assert.equal(validateReview(result, 3), result);
   assert.equal(source.ocrCharacters[1].text, "书");
 });
+
+test("categorized JSON grammar results reach learner memory without altering ranges or confirmation", async () => {
+  const { handleReview } = await import("../ai/review.js");
+  const { createLearnerMemory } = await import("../learning/memory.mjs");
+  const memory = createLearnerMemory(null);
+  for (const [revision, text, original, start, end] of [[1, "我有三个书。", "个", 3, 4], [2, "我有三书。", "三书", 2, 4]]) {
+    const result = await requestConfirmedReview(text, revision, undefined, async (_, init) => handleReview(new Request("http://localhost/api/review", init), {
+      recogniseHandwriting: async () => { throw new Error("OCR must not run"); },
+      analyseGrammar: async () => ({ correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", category: "measure_word",
+        original, start, end, replacement: original === "个" ? "本" : "三本书", explanation: "Use 本 for books." }] }),
+    }));
+    assert.equal(result.issues[0].category, "measure_word");
+    assert.equal(result.issues[0].start, start);
+    memory.recordCompletedReview(result, { sessionId: "workspace-a", revision });
+    memory.recordCompletedReview(result, { sessionId: "workspace-a", revision });
+    assert.equal(memory.getDifficultyCategories().categories.measure_word, revision);
+    assert.equal(Boolean(memory.getPersonalisedTip(result)), revision === 2);
+  }
+  const invalid = review(); invalid.issues[0].category = "invented";
+  assert.throws(() => validateReview(invalid, 3), /unexpected response/);
+});

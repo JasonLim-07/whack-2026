@@ -176,7 +176,7 @@ test("Gemini request uses configured model, learner level and the complete respo
   assert.equal(body.generationConfig.responseMimeType, "application/json");
   const schema = body.generationConfig.responseJsonSchema;
   assert.deepEqual(schema.required, ["correctedText", "issues"]);
-  assert.deepEqual(schema.properties.issues.items.required, ["id", "type", "original", "replacement", "explanation", "start", "end"]);
+  assert.deepEqual(schema.properties.issues.items.required, ["id", "type", "original", "replacement", "explanation", "start", "end", "category"]);
   assert.deepEqual(schema.properties.issues.items.properties.type.enum, ["grammar", "word_choice", "character"]);
 });
 
@@ -273,4 +273,37 @@ test("grammar ranges validate repeated text, supplementary characters and insert
   for (const range of [{ start: 0, end: 1 }, { start: -1, end: 0 }, { start: 1, end: 4 }, { start: 1.5, end: 2 }, { start: 2, end: 1 }]) {
     assert.throws(() => validateGrammarResponse({ correctedText: text, issues: [{ ...issue, ...range }] }, text), /range must match/);
   }
+});
+
+test("optional grammar categories preserve legacy results and enforce the fixed Mandarin taxonomy", () => {
+  const legacy = correction();
+  assert.equal(validateGrammarResponse(legacy, originalText).issues[0].category, undefined);
+  const categorized = correction();
+  categorized.issues[0].category = "measure_word";
+  assert.equal(validateGrammarResponse(categorized, originalText).issues[0].category, "measure_word");
+  for (const invalid of [{ category: "classifier" }, { category: null },
+    { category: "particle", subcategory: "time_placement" }, { subcategory: "other" },
+    { category: "word_order", subcategory: "english_word_order" }]) {
+    const value = correction(); Object.assign(value.issues[0], invalid);
+    assert.throws(() => validateGrammarResponse(value, originalText), /category or subcategory/);
+  }
+  const order = { correctedText: "我明天去学校。", issues: [{ id: "order", type: "grammar", category: "word_order",
+    subcategory: "time_placement", original: "去学校明天", replacement: "明天去学校", start: 1, end: 6, explanation: "Put time before the action." }] };
+  assert.deepEqual(validateGrammarResponse(order, "我去学校明天。"), order);
+});
+
+test("existing Gemini request asks for categories and measure-word consistency without another call", async (t) => {
+  let calls = 0;
+  mockGemini(t, async (_, init) => {
+    calls++;
+    const body = JSON.parse(init.body);
+    const schema = body.generationConfig.responseJsonSchema.properties.issues.items;
+    assert.deepEqual(schema.properties.category.enum, ["measure_word", "word_order", "particle", "missing_word", "verb_usage", "other"]);
+    assert.deepEqual(schema.properties.subcategory.enum, ["time_placement", "location_placement", "question_word_placement", "other"]);
+    assert.match(JSON.stringify(body.systemInstruction), /missing measure word.*wrong/s);
+    const value = correction(); value.issues[0].category = "measure_word";
+    return geminiResponse(JSON.stringify(value));
+  });
+  assert.equal((await analyseGrammar(originalText)).issues[0].category, "measure_word");
+  assert.equal(calls, 1);
 });

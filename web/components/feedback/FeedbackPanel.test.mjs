@@ -94,3 +94,15 @@ test("visual warning reuses character choices without claiming a stroke mistake"
   assert.doesNotMatch(panel, /missing stroke|incorrect stroke|checked=""/i);
   assert.match(panel, /disabled=""/);
 });
+
+test("one compact personalisation tip appears only with completed grammar feedback", () => {
+  const tip = "Measure words have come up again. Books use 本.";
+  const review = { recognizedText: "我有三书。", correctedText: "我有三本书。", ocrConfidence: null,
+    issues: [{ id: "one", type: "grammar", category: "measure_word", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
+  const html = render({ review, personalisedTip: tip, onResetHistory() {} });
+  assert.equal(html.split(tip).length - 1, 1);
+  assert.match(html, /Reset learning history/);
+  assert.match(html, /Use 本 for books/);
+  assert.doesNotMatch(render({ review: pending, personalisedTip: tip }), /Measure words have come up again/);
+  assert.doesNotMatch(render({ review, stale: true, personalisedTip: tip }), /Measure words have come up again/);
+});
