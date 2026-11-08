@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
-import { createReviewRunner } from "@/lib/review/client.mjs";
+import { createReviewRunner, getConfirmedText } from "@/lib/review/client.mjs";
 
 export default function WritingWorkspace() {
   const canvasRef = useRef(null);
@@ -11,11 +11,13 @@ export default function WritingWorkspace() {
   const drawingRef = useRef({ revision: 0, hasInk: false });
   const runnerRef = useRef(null);
   const reviewRef = useRef(null);
+  const pendingRef = useRef(false);
   const [hasInk, setHasInk] = useState(false);
   const [loading, setLoading] = useState(false);
   const [review, setReview] = useState(null);
   const [error, setError] = useState(null);
   const [stale, setStale] = useState(false);
+  const [selections, setSelections] = useState({});
   // null uses responsive CSS: open on desktop, closed on smaller screens.
   const [panelOpen, setPanelOpen] = useState(null);
 
@@ -32,23 +34,34 @@ export default function WritingWorkspace() {
   const handleDrawingChange = useCallback((drawing) => {
     drawingRef.current = drawing;
     setHasInk(drawing.hasInk);
-    if (reviewRef.current) setStale(true);
+    if (reviewRef.current || pendingRef.current) setStale(true);
+    runnerRef.current?.cancel();
+    pendingRef.current = false;
+    setLoading(false);
     reviewRef.current = null;
     setReview(null);
     setError(null);
+    setSelections({});
   }, []);
 
-  function handleReview() {
+  function handleReview(text) {
     if (!drawingRef.current.hasInk || !canvasRef.current) return;
+    // Button clicks pass an event; only an explicit string confirms text.
+    const confirming = typeof text === "string";
     const revision = drawingRef.current.revision;
     runnerRef.current?.run({
       revision,
+      ...(confirming ? { text } : {}),
       exportImage: () => canvasRef.current.exportImage(),
       isCurrent: (submittedRevision) => drawingRef.current.revision === submittedRevision,
       onStart() {
         setLoading(true);
-        reviewRef.current = null;
-        setReview(null);
+        pendingRef.current = true;
+        if (!confirming) {
+          reviewRef.current = null;
+          setReview(null);
+          setSelections({});
+        }
         setError(null);
         setStale(false);
         setPanelOpen(true);
@@ -56,10 +69,18 @@ export default function WritingWorkspace() {
       onSuccess(result) {
         reviewRef.current = result;
         setReview(result);
+        setSelections({});
       },
       onError: setError,
-      onFinish: () => setLoading(false),
+      onFinish() { pendingRef.current = false; setLoading(false); },
     });
+  }
+
+  function handleConfirm() {
+    const current = reviewRef.current;
+    if (!current?.requiresVerification || current.revision !== drawingRef.current.revision) return;
+    try { handleReview(getConfirmedText(current, selections)); }
+    catch (confirmationError) { setError(confirmationError.message); }
   }
 
   function closePanel() {
@@ -99,7 +120,9 @@ export default function WritingWorkspace() {
             <h2 ref={panelHeadingRef} tabIndex={-1} id="writing-review-heading" className="text-base font-semibold">Writing Review</h2>
             <button type="button" onClick={closePanel} aria-label="Collapse Writing Review" className="rounded-md px-2 py-1 text-xs text-neutral-600 hover:bg-neutral-100 focus-visible:outline-2">Collapse</button>
           </div>
-          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk} onReview={handleReview} />
+          <FeedbackPanel review={review} loading={loading} error={error} stale={stale} canReview={hasInk} onReview={handleReview}
+            selections={selections} onSelectCharacter={(position, char) => setSelections((current) => ({ ...current, [position]: char }))}
+            onConfirm={handleConfirm} />
         </aside>
       </div>
     </main>
