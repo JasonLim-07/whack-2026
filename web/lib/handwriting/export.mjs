@@ -30,8 +30,7 @@ export function exportBounds(strokes) {
   return { left, top, width, height };
 }
 
-export async function exportStrokes(strokes, createCanvas = () => document.createElement("canvas")) {
-  const bounds = exportBounds(strokes);
+export async function exportStrokes(strokes, createCanvas = () => document.createElement("canvas"), bounds = exportBounds(strokes)) {
   const canvas = createCanvas();
   canvas.width = bounds.width;
   canvas.height = bounds.height;
@@ -48,4 +47,11 @@ export async function exportStrokes(strokes, createCanvas = () => document.creat
   if (blob.type !== "image/png" || blob.size === 0) throw new Error("Unable to export a valid PNG. Please try again.");
   if (blob.size > MAX_IMAGE_BYTES) throw new Error("The handwriting image exceeds 5 MB. Please review a smaller writing sample.");
   return blob;
+}
+
+
+export async function exportStrokeSnapshot(strokes, revision, createCanvas) {
+  const bounds = exportBounds(strokes);
+  const image = await exportStrokes(strokes, createCanvas, bounds);
+  return { image, revision, bounds };
 }

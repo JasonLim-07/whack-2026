@@ -1,3 +1,4 @@
+import { validOcrCharacters } from "../review/locations.mjs";
 import { Buffer } from "node:buffer";
 import { analyseGrammar, validateGrammarResponse } from "./grammar.js";
 
@@ -126,7 +127,12 @@ export async function reviewHandwriting(
   } catch (error) {
     throw providerError(error, "GRAMMAR");
   }
+  const characters = recognition.characters ?? [];
+  if (!validOcrCharacters(characters, recognition.text)) {
+    throw new ReviewError(502, "INVALID_OCR_RESPONSE", "Recognition provider returned invalid character locations.");
+  }
   return {
+    ocrCharacters: characters,
     recognizedText: recognition.text,
     ocrConfidence: recognition.confidence,
     ocrSegments: segments,

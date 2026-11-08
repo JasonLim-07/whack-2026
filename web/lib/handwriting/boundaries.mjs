@@ -1,6 +1,6 @@
 ﻿import { GRID_SIZE } from "./grid.mjs";
 
-export const BOUNDARY_TOLERANCE_RATIO = 0.05;
+export const BOUNDARY_TOLERANCE_RATIO = 0.1;
 export const WARNING_DURATION_MS = 800;
 
 export function cellAt(point) {

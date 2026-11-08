@@ -155,6 +155,10 @@ Expose an imperative method through a React ref:
 
 - `exportImage()` — returns `Promise<Blob>` containing a PNG image.
 
+The ref also exposes `exportSnapshot()`, returning `Promise<{ image, revision, bounds }>` captured consistently. `bounds` contains `left`, `top`, `width` and `height` in world units. The method includes completed strokes without interrupting an active pen stroke; during an unfinished eraser gesture it captures the pre-gesture completed state.
+
+Optional `onEditStart()` and `onEditEnd()` callbacks signal active pen/eraser gestures separately from committed drawing revisions. Optional `grammarHighlights` (world-coordinate rectangles) and `selectedIssueId` render review overlays without changing stored ink.
+
 The returned `Blob` must have MIME type `image/png`.
 
 PNG export must include all remaining completed handwriting, including offscreen strokes, cropped to its world-space bounds with 24 units of white padding. Export at one pixel per world unit, independent of pan, zoom and display pixel ratio. It must use a solid white background and omit the grid, boundary warnings, feedback panel and toolbar. Include boundary-flagged strokes without filtering. Reject empty writing, exports above 4096 pixels per side, or PNG files above 5 MiB; do not silently downscale. This all-handwriting policy was agreed during fullintegration/mvp integration.
@@ -253,6 +257,8 @@ Each issue contains:
 - `original`: original Chinese substring.
 - `replacement`: suggested replacement, or an empty string for a deletion.
 - `explanation`: concise explanation in English.
+- `start`: inclusive Unicode code-point offset into the exact original OCR text.
+- `end`: exclusive Unicode code-point offset. `Array.from(text).slice(start, end).join("")` must equal `original`. Insertions use `start === end` and an empty `original`. Repeated substrings require the correct explicit range; never infer the first match or count UTF-16 code units.
 
 Example input: `我有两个书。`
 
@@ -305,6 +311,7 @@ Successful response fields:
 - `recognizedText`: original OCR transcription.
 - `ocrConfidence`: overall OCR confidence number or `null`.
 - `ocrSegments`: OCR segments array.
+- `ocrCharacters`: ordered `{ text, start, end, bounds }` entries aligned with the original transcription. Offsets use the same Unicode code-point convention as grammar issues. Bounds are `{ x, y, width, height }` in exported PNG pixels or `null` when unavailable. Return `[]` if character slots cannot be aligned to the transcription. Use actual PNG dimensions when converting normalised provider boxes.
 - `correctedText`: suggested corrected sentence.
 - `issues`: grammar issues array.
 - `revision`: supplied revision number, or `null` when omitted.
@@ -508,3 +515,12 @@ The MVP is complete when a user can:
 6. View the feedback beside the original handwriting.
 
 The complete interaction must work in the browser without manually transferring images or text between applications.
+
+## Current whiteboard guidance and review overlays
+
+- Grid cells remain 96 world units. Soft boundary tolerance is 10% (9.6 units); a significant crossing produces one amber outline and a 1.6-second fading message per stroke. Flagged strokes and their cell markers remain until removed.
+- Pen/Eraser gestures below 100% pan and show a concise writing-scale message. Hand and Space pan at every zoom.
+- The 100% button sets zoom to exactly one, selects Pen, and centres the last point of the latest remaining stroke. With no ink it preserves the current world centre. Slider/wheel zoom retains its existing anchor behaviour.
+- Editing stays available during AI review. Starting an edit cancels the pending client request and clears stale results/overlays before the drawing revision changes. Late responses are ignored. Clear and Undo also invalidate review results.
+- Review retains the snapshot export origin locally. Convert OCR boxes to world coordinates by adding `bounds.left` and `bounds.top`; do not infer a character-to-cell mapping from grid order. Highlight only located existing characters; show insertion indicators in typed text, without assigning them to unrelated ink.
+- Feedback cards are keyboard-selectable and emphasise matching text/ink highlights. Selection does not move the viewport. Overlays, markers and guidance never enter PNG export.

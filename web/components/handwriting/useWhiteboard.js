@@ -1,31 +1,33 @@
 ﻿"use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { screenToWorld, wheelDelta, zoomAt } from "@/lib/handwriting/viewport.mjs";
-import { renderBoundaryWarnings, renderWhiteboard } from "@/lib/handwriting/render.mjs";
+import { screenToWorld, worldToScreen, wheelDelta, zoomAt } from "@/lib/handwriting/viewport.mjs";
+import { renderBoundaryWarnings, renderGrammarHighlights, renderWhiteboard } from "@/lib/handwriting/render.mjs";
 import { appendStroke, clearStrokes, commitEdit, undoEdit } from "@/lib/handwriting/strokes.mjs";
 
 import { cellAt, flagBoundaryCrossing, invalidCells, pruneWarnings } from "@/lib/handwriting/boundaries.mjs";
-import { exportStrokes } from "@/lib/handwriting/export.mjs";
+import { writingViewport, NOTICE_DURATION_MS } from "@/lib/handwriting/guidance.mjs";
+import { exportStrokeSnapshot } from "@/lib/handwriting/export.mjs";
 import { eraseStrokes } from "@/lib/handwriting/eraser.mjs";
 
-export default function useWhiteboard({ disabled, onChange }) {
+export default function useWhiteboard({ disabled, onChange, onEditStart, onEditEnd, grammarHighlights = [], selectedIssueId = null }) {
   const rootRef = useRef(null);
   const canvasRef = useRef(null);
   const controllerRef = useRef(null);
-  const optionsRef = useRef({ disabled, onChange });
+  const optionsRef = useRef({ disabled, onChange, onEditStart, onEditEnd, grammarHighlights, selectedIssueId });
   const strokesRef = useRef([]);
   const historyRef = useRef([]);
   const warningsRef = useRef(new Map());
   const viewportRef = useRef({ offsetX: 0, offsetY: 0, zoom: 1 });
   const gestureRef = useRef(null);
   const revisionRef = useRef(0);
-  const [ui, setUi] = useState({ tool: "pen", zoom: 1, count: 0, canUndo: false, panning: false, space: false });
+  const [ui, setUi] = useState({ tool: "pen", zoom: 1, count: 0, canUndo: false, panning: false, space: false, notice: null });
 
   useLayoutEffect(() => {
-    optionsRef.current = { disabled, onChange };
+    optionsRef.current = { disabled, onChange, onEditStart, onEditEnd, grammarHighlights, selectedIssueId };
+    controllerRef.current?.redraw();
     if (disabled) controllerRef.current?.cancel();
-  }, [disabled, onChange]);
+  }, [disabled, onChange, onEditStart, onEditEnd, grammarHighlights, selectedIssueId]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -36,6 +38,9 @@ export default function useWhiteboard({ disabled, onChange }) {
     let space = false;
     let frame = null;
     let resolutionQuery;
+    let notice = null;
+    let noticeTimer = null;
+    let noticeId = 0;
 
     function redraw() {
       if (frame !== null) return;
@@ -44,12 +49,38 @@ export default function useWhiteboard({ disabled, onChange }) {
         const activeStroke = gestureRef.current?.stroke;
         const now = performance.now();
         pruneWarnings(warningsRef.current, strokesRef.current, activeStroke, now);
-        renderWhiteboard(ctx, size, viewportRef.current, strokesRef.current, activeStroke);
+        renderWhiteboard(ctx, size, viewportRef.current, strokesRef.current, activeStroke, () =>
+          renderGrammarHighlights(ctx, size, viewportRef.current, optionsRef.current.grammarHighlights, optionsRef.current.selectedIssueId));
+        if (notice) {
+          const point = worldToScreen(notice.world, viewportRef.current);
+          const container = canvas.parentElement;
+          container.style.setProperty("--notice-left", `${Math.max(8, Math.min(point.x + 12, size.width - 272))}px`);
+          container.style.setProperty("--notice-top", `${Math.max(8, Math.min(point.y + 12, size.height - 72))}px`);
+        }
         renderBoundaryWarnings(ctx, size, viewportRef.current,
           invalidCells(strokesRef.current, activeStroke), warningsRef.current, now);
         // Continue only while a transient outline is fading, including its final clean frame.
         if (warningsRef.current.size) redraw();
       });
+    }
+
+    function showNotice(message, world, strokeId = null) {
+      clearTimeout(noticeTimer);
+      notice = { id: ++noticeId, message, world, strokeId };
+      setUi((previous) => ({ ...previous, notice }));
+      noticeTimer = setTimeout(() => {
+        notice = null;
+        setUi((previous) => ({ ...previous, notice: null }));
+        redraw();
+      }, NOTICE_DURATION_MS);
+      redraw();
+    }
+
+    function dismissNotice() {
+      clearTimeout(noticeTimer);
+      if (!notice) return;
+      notice = null;
+      setUi((previous) => ({ ...previous, notice: null }));
     }
 
     function resize() {
@@ -77,6 +108,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     function releaseGesture() {
       const gesture = gestureRef.current;
       gestureRef.current = null;
+      if (gesture && gesture.mode !== "pan") optionsRef.current.onEditEnd?.();
       if (gesture && canvas.hasPointerCapture(gesture.id)) canvas.releasePointerCapture(gesture.id);
       setUi((previous) => previous.panning ? { ...previous, panning: false } : previous);
     }
@@ -84,11 +116,13 @@ export default function useWhiteboard({ disabled, onChange }) {
     function cancel() {
       const gesture = gestureRef.current;
       if (gesture?.mode === "erase") strokesRef.current = gesture.before;
+      if (gesture?.stroke?.id === notice?.strokeId) dismissNotice();
       releaseGesture();
       redraw();
     }
 
     function notify() {
+      if (notice?.strokeId && !strokesRef.current.some((stroke) => stroke.id === notice.strokeId)) dismissNotice();
       revisionRef.current += 1;
       setUi((previous) => ({ ...previous, count: strokesRef.current.length, canUndo: historyRef.current.length > 0 }));
       redraw();
@@ -104,6 +138,7 @@ export default function useWhiteboard({ disabled, onChange }) {
         if (point.x !== last.x || point.y !== last.y) gesture.stroke.points.push(point);
         if (flagBoundaryCrossing(gesture.stroke, point)) {
           warningsRef.current.set(gesture.stroke.id, { cell: gesture.stroke.originCell, startedAt: performance.now() });
+          showNotice("Keep this character within its square.", point, gesture.stroke.id);
         }
       }
     }
@@ -116,6 +151,10 @@ export default function useWhiteboard({ disabled, onChange }) {
       canvas.focus({ preventScroll: true });
       const point = localPoint(event);
       const world = screenToWorld(point, viewportRef.current);
+      if (viewportRef.current.zoom < 1 && tool !== "hand" && !space) {
+        showNotice(tool === "eraser" ? "Zoom to 100% to erase." : "Zoom to 100% to write.", world);
+      }
+      if (!pan) optionsRef.current.onEditStart?.();
       const gesture = {
         id: event.pointerId, mode: pan ? "pan" : tool === "eraser" ? "erase" : "draw",
         last: point, before: strokesRef.current,
@@ -140,9 +179,10 @@ export default function useWhiteboard({ disabled, onChange }) {
       redraw();
     }
 
-    function pointerMove(event) {
+    function pointerMove(event, finishing = false) {
       const gesture = gestureRef.current;
       if (!gesture || gesture.id !== event.pointerId) return;
+      if (!finishing && event.pointerType === "mouse" && event.buttons === 0) { cancel(); return; }
       if (gesture.mode === "draw") {
         addPoints(event, gesture);
       } else if (gesture.mode === "erase") {
@@ -167,7 +207,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     function pointerUp(event) {
       const gesture = gestureRef.current;
       if (!gesture || gesture.id !== event.pointerId) return;
-      pointerMove(event);
+      pointerMove(event, true);
       releaseGesture();
       if (gesture.stroke) {
         strokesRef.current = appendStroke(strokesRef.current, gesture.stroke);
@@ -221,6 +261,7 @@ export default function useWhiteboard({ disabled, onChange }) {
       strokesRef.current = clearStrokes(strokesRef.current);
       historyRef.current = [];
       warningsRef.current.clear();
+      dismissNotice();
       notify();
     }
 
@@ -262,15 +303,26 @@ export default function useWhiteboard({ disabled, onChange }) {
 
     controllerRef.current = {
       cancel,
+      redraw,
       undo,
       clear,
-      exportImage() {
+      async exportSnapshot() {
+        const strokes = gestureRef.current?.mode === "erase" ? gestureRef.current.before : strokesRef.current;
+        const revision = revisionRef.current;
+        return exportStrokeSnapshot(strokes, revision);
+      },
+      returnToWriting() {
         cancel();
-        return exportStrokes(strokesRef.current);
+        releaseSpace();
+        tool = "pen";
+        viewportRef.current = writingViewport(viewportRef.current, strokesRef.current, size);
+        setUi((previous) => ({ ...previous, tool, zoom: 1 }));
+        redraw();
       },
       selectTool(nextTool) {
         if (optionsRef.current.disabled && nextTool !== "hand") return;
         cancel();
+        releaseSpace();
         tool = nextTool;
         setUi((previous) => ({ ...previous, tool }));
       },
@@ -296,6 +348,7 @@ export default function useWhiteboard({ disabled, onChange }) {
     window.addEventListener("resize", resize);
 
     return () => {
+      clearTimeout(noticeTimer);
       observer.disconnect();
       resolutionQuery?.removeEventListener("change", watchResolution);
       canvas.removeEventListener("pointerdown", pointerDown);
@@ -321,7 +374,9 @@ export default function useWhiteboard({ disabled, onChange }) {
     rootRef,
     canvasRef,
     ui,
-    exportImage: () => controllerRef.current ? controllerRef.current.exportImage() : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
+    returnToWriting: () => controllerRef.current?.returnToWriting(),
+    exportSnapshot: () => controllerRef.current ? controllerRef.current.exportSnapshot() : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
+    exportImage: () => controllerRef.current ? controllerRef.current.exportSnapshot().then((snapshot) => snapshot.image) : Promise.reject(new Error("The whiteboard is not ready yet. Please try again.")),
     selectTool: (tool) => controllerRef.current?.selectTool(tool),
     setZoom: (zoom) => controllerRef.current?.setZoom(zoom),
     undo: () => controllerRef.current?.undo(),

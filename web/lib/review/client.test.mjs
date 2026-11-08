@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { createReviewRunner, requestReview, validateReview } from "./client.mjs";
 
 const review = (revision = 3) => ({
-  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], revision,
-  issues: [{ id: "one", type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
+  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], ocrCharacters: [], revision,
+  issues: [{ id: "one", start: 3, end: 4, type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
 });
 const image = new Blob(["test-png"], { type: "image/png" });
 const deferred = () => {
@@ -136,4 +136,24 @@ test("frontend multipart request passes through the real backend handler and gra
     }));
   assert.deepEqual(stages, ["ocr", "grammar"]);
   assert.deepEqual(result, review());
+});
+
+test("snapshot metadata is delivered with its result; edits during export cancel old callbacks", async () => {
+  const firstExport = deferred();
+  let submissions = 0;
+  const runner = createReviewRunner(async () => { submissions++; return review(); });
+  const first = callbacks({ exportSnapshot: () => firstExport.promise });
+  const task = runner.run(first.options);
+  runner.cancel(); // Called immediately at ink-edit start, before revision commits.
+  const bounds = { left: -70, top: -90, width: 200, height: 100 };
+  let captured;
+  const next = callbacks({ exportSnapshot: async () => ({ image, revision: 3, bounds }), onSuccess: (value, snapshot) => { captured = { value, snapshot }; } });
+  await runner.run(next.options);
+  firstExport.resolve({ image, revision: 3, bounds });
+  await task;
+  assert.equal(submissions, 1);
+  assert.equal(captured.snapshot.bounds, bounds);
+  assert.deepEqual(captured.value, review());
+  assert.deepEqual(first.events, ["start"]);
+  assert.deepEqual(next.events, ["start", "finish"]);
 });
