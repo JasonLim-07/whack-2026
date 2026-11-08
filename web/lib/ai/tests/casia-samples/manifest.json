@@ -1,0 +1,27 @@
+[
+  {
+    "id": "casia-test-1",
+    "fileName": "casia-line-01.png",
+    "groundTruth": "到厄里斯的最新密度及轨道数据。结果发现,厄里斯的质量大约"
+  },
+  {
+    "id": "casia-test-2",
+    "fileName": "casia-line-02.png",
+    "groundTruth": "亚”时,利用设在美国夏威夷的凯克大型望远镜和太空中的哈勃太空望"
+  },
+  {
+    "id": "casia-test-3",
+    "fileName": "casia-line-03.png",
+    "groundTruth": "大”头衔也将不保。"
+  },
+  {
+    "id": "casia-test-4",
+    "fileName": "casia-line-04.png",
+    "groundTruth": "美国加利福尼亚理工学院天文学家迈克尔·布朗等人定于15日出版的"
+  },
+  {
+    "id": "casia-test-5",
+    "fileName": "casia-line-05.png",
+    "groundTruth": "美国《科学》杂志上报告说,他们在研究矮行星厄里斯的卫星“迪丝诺美"
+  }
+]

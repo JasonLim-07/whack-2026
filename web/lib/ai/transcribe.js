@@ -843,4 +843,6 @@ export function clearTranscriptionCache() {
 }
 
 export const transcribe = transcribeHandwriting;
+export const recognizeHandwriting = transcribeHandwriting;
+export const recogniseHandwriting = transcribeHandwriting;
 export default transcribeHandwriting;
