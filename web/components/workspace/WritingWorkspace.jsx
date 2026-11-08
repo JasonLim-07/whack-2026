@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import HandwritingCanvas from "@/components/handwriting/HandwritingCanvas";
 import FeedbackPanel from "@/components/feedback/FeedbackPanel";
 import { handwritingHighlights } from "@/lib/review/locations.mjs";
-import { createReviewRunner, getConfirmedText } from "@/lib/review/client.mjs";
+import { createReviewRunner, getConfirmedText, restoreConfirmedLocations } from "@/lib/review/client.mjs";
 
 export default function WritingWorkspace() {
   const canvasRef = useRef(null);
@@ -78,6 +78,7 @@ export default function WritingWorkspace() {
   function handleReview(text) {
     // Button clicks pass an event; only a string confirms text.
     const confirming = typeof text === "string";
+    const confirmationSource = confirming ? reviewRef.current : null;
     if (!drawingRef.current.hasInk || !canvasRef.current || editingRef.current) return;
     const revision = drawingRef.current.revision;
     runnerRef.current?.run({
@@ -104,8 +105,11 @@ export default function WritingWorkspace() {
       },
       onSuccess(result, snapshot) {
         if (snapshot) setSnapshotBounds(snapshot.bounds);
-        reviewRef.current = result;
-        setReview(result);
+        const locatedResult = confirming
+          ? restoreConfirmedLocations(result, confirmationSource, selections, confirmedText, intentSuggestions)
+          : result;
+        reviewRef.current = locatedResult;
+        setReview(locatedResult);
         setSelections({});
         setConfirmedText(result.recognizedText);
         setIntentDescriptions({});

@@ -106,6 +106,35 @@ export function getConfirmedText(review, selections, editedText, intentSuggestio
   return result.join("");
 }
 
+// Geometry stays local to the unchanged drawing revision. Only explicit edits
+// can move its text offsets; arbitrary sentence edits cannot be aligned safely.
+export function restoreConfirmedLocations(result, source, selections, editedText, intentSuggestions = {}) {
+  if (!source || source.revision !== result.revision ||
+    getConfirmedText(source, selections, editedText, intentSuggestions) !== result.recognizedText) return result;
+  const original = source.ocrCharacters ?? [];
+  if (!original.length || !validOcrCharacters(original, source.recognizedText)) return result;
+  if (source.requiresTextConfirmation === true) {
+    return source.recognizedText === result.recognizedText ? { ...result, ocrCharacters: original } : result;
+  }
+  const points = Array.from(source.recognizedText);
+  const locations = points.map((text, index) => ({ text, bounds:
+    original.find((entry) => entry.start === index && entry.end === index + 1)?.bounds ?? null }));
+  const edits = [
+    ...source.characterCandidates.map((candidate) => ({ start: candidate.position, end: candidate.position + 1, value: selections[candidate.position] })),
+    ...(source.intentTargets ?? []).map((target) => ({ ...target, value: selections[target.id] })),
+  ].sort((a, b) => b.start - a.start || b.end - a.end);
+  for (const edit of edits) {
+    const replacement = Array.from(edit.value);
+    // A single replacement still describes the same written character. For
+    // inserted or multi-character suggestions, keep geometry unavailable.
+    const bounds = edit.end - edit.start === 1 && replacement.length === 1
+      ? locations[edit.start].bounds : null;
+    locations.splice(edit.start, edit.end - edit.start, ...replacement.map((text) => ({ text, bounds })));
+  }
+  const characters = locations.map((entry, start) => ({ ...entry, start, end: start + 1 }));
+  return validOcrCharacters(characters, result.recognizedText) ? { ...result, ocrCharacters: characters } : result;
+}
+
 export function validateIntentResult(result, revision) {
   if (!result || result.revision !== revision || !Array.isArray(result.suggestions) ||
     result.suggestions.length < 1 || result.suggestions.length > 3) throw new Error(INVALID_RESPONSE);

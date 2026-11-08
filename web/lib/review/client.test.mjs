@@ -410,3 +410,69 @@ test("snapshot revision mismatch never reaches OCR and intent bypasses snapshot 
   await runner.run(intent.options);
   assert.deepEqual(intent.events, ["start", { revision: 3, suggestions: suggestions["intent:3"] }, "finish"]);
 });
+
+test("confirmed grammar feedback retains OCR boxes and highlights the same ink", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const { handwritingHighlights } = await import("./locations.mjs");
+  const { handleReview } = await import("../ai/review.js");
+  const box = { x: 30, y: 10, width: 20, height: 25 };
+  const source = { ...verification(), ocrCharacters: Array.from(verification().recognizedText,
+    (text, start) => ({ text, start, end: start + 1, bounds: box })) };
+  const selections = { 3: "书" };
+  const text = getConfirmedText(source, selections);
+  const issue = { id: "measure", start: 2, end: 4, original: "三书", replacement: "三本书", type: "grammar", explanation: "Use 本 for books." };
+  let located;
+  const runner = createReviewRunner(undefined, (value, revision, signal) => requestConfirmedReview(value, revision, signal,
+    async (_, init) => handleReview(new Request("http://localhost/api/review", init), {
+      analyseGrammar: async () => ({ correctedText: "我有三本书。", issues: [issue] }),
+      recogniseHandwriting: () => { throw new Error("Confirmation must not repeat OCR"); },
+    })));
+  await runner.run(callbacks({ text, exportSnapshot: () => { throw new Error("Must keep the original snapshot"); },
+    onSuccess(result) { located = restoreConfirmedLocations(result, source, selections); } }).options);
+  assert.ok(located);
+  assert.deepEqual(located.ocrCharacters, source.ocrCharacters);
+  assert.equal(validateReview(located, 3), located);
+  assert.deepEqual(handwritingHighlights(located, { left: -100, top: -20 }), [
+    { issueId: "measure", x: -70, y: -10, width: 20, height: 25 },
+    { issueId: "measure", x: -70, y: -10, width: 20, height: 25 },
+  ]);
+});
+
+test("confirmation shifts known locations around insertions without assigning ink to new text", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), characterCandidates: [], intentTargets: [{ id: "missing", start: 3, end: 3, original: "" }],
+    ocrCharacters: Array.from(verification().recognizedText, (text, start) => ({ text, start, end: start + 1,
+      bounds: { x: start * 20, y: 0, width: 15, height: 20 } })) };
+  const selections = { missing: "本" };
+  const suggestions = { missing: [{ text: "本" }] };
+  const text = getConfirmedText(source, selections, undefined, suggestions);
+  const result = restoreConfirmedLocations({ ...review(), recognizedText: text }, source, selections, undefined, suggestions);
+  assert.equal(result.ocrCharacters[3].bounds, null);
+  assert.deepEqual(result.ocrCharacters[4], { ...source.ocrCharacters[3], start: 4, end: 5 });
+  assert.equal(result.ocrCharacters.map((entry) => entry.text).join(""), text);
+  const stale = { ...review(), revision: 4 };
+  assert.equal(restoreConfirmedLocations(stale, source, selections), stale);
+});
+
+test("whole-sentence edits retain boxes only when the transcription is unchanged", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), requiresTextConfirmation: true, clarificationMessage: "Check the text.", unresolvedRegions: [],
+    ocrCharacters: Array.from(verification().recognizedText, (text, start) => ({ text, start, end: start + 1, bounds: null })) };
+  const unchanged = { ...review(), recognizedText: source.recognizedText };
+  assert.deepEqual(restoreConfirmedLocations(unchanged, source, {}, source.recognizedText).ocrCharacters, source.ocrCharacters);
+  const changed = { ...review(), recognizedText: "我有书。" };
+  assert.equal(restoreConfirmedLocations(changed, source, {}, changed.recognizedText), changed);
+});
+
+test("single-character confirmation preserves its box using Unicode code-point offsets", async () => {
+  const { restoreConfirmedLocations } = await import("./client.mjs");
+  const source = { ...verification(), recognizedText: "𠀀书", characterCandidates: [{ position: 1, originalAttempt: "书", confidence: null,
+    options: [{ char: "书", reason: "Original" }, { char: "本", reason: "Alternative" }] }],
+    ocrCharacters: [{ text: "𠀀", start: 0, end: 1, bounds: null },
+      { text: "书", start: 1, end: 2, bounds: { x: 30, y: 10, width: 20, height: 25 } }] };
+  const confirmed = getConfirmedText(source, { 1: "本" });
+  const result = restoreConfirmedLocations({ ...review(), recognizedText: confirmed, issues: [] }, source, { 1: "本" });
+  assert.deepEqual(result.ocrCharacters[1], { ...source.ocrCharacters[1], text: "本" });
+  assert.equal(validateReview(result, 3), result);
+  assert.equal(source.ocrCharacters[1].text, "书");
+});
