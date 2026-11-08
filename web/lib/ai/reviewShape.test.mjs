@@ -94,11 +94,11 @@ test("existing candidate choices and low-confidence English-intent targets are n
 });
 
 test("moderate scores pass and genuinely low or unknown scores retain verification", async (t) => {
-  for (const confidence of [0.75, 0.60, 0.40, null]) {
+  for (const confidence of [0.75, 0.74, 0.60, 0.40, null]) {
     const value = fixture(true);
     const calls = providers(t, value, confidence);
     const result = await upload(value);
-    if (confidence !== null && confidence >= 0.60) {
+    if (confidence !== null && confidence >= 0.75) {
       assert.deepEqual(calls, ["ocr", "grammar"]);
       assert.equal(result.requiresVerification, undefined);
       continue;

@@ -63,8 +63,8 @@ test("endpoints enforce their respective request types and validate malformed/ov
 
 test("character concerns retain verification instead of premature grammar feedback", async () => {
   const response = await handleRecognition(pngRequest(), { recogniseHandwriting: async () => ({
-    text: "末", confidence: null, segments: [{ text: "末", confidence: 0.55 }], characters: [], status: "LOW_CONFIDENCE", requiresVerification: true,
-    characterCandidates: [{ position: 0, originalAttempt: "末", confidence: 0.55, options: [{ char: "末", reason: "Original" }, { char: "未", reason: "Alternative" }] }],
+    text: "末", confidence: null, segments: [{ text: "末", confidence: 0.749 }], characters: [], status: "LOW_CONFIDENCE", requiresVerification: true,
+    characterCandidates: [{ position: 0, originalAttempt: "末", confidence: 0.749, options: [{ char: "末", reason: "Original" }, { char: "未", reason: "Alternative" }] }],
   }), analyseGrammar: () => { throw new Error("Must not run grammar"); } });
   const result = await response.json(); assert.equal(result.requiresVerification, true);
   assert.equal(result.issues, undefined); validateRecognition(result, 7);
@@ -81,7 +81,7 @@ test("a high aggregate recognition result cannot hide an uncertain character seg
 });
 
 test("gentler automatic policy accepts moderate OCR without changing provider scores", async () => {
-  for (const confidence of [0.60, 0.75, 0.899]) {
+  for (const confidence of [0.75, 0.80, 0.899]) {
     const result = await handleRecognition(pngRequest(), { recogniseHandwriting: async () => ({
       text: "末。", confidence: null, status: "LOW_CONFIDENCE", requiresVerification: true, characters: [],
       segments: [{ text: "末", confidence }, { text: "。", confidence: null }],

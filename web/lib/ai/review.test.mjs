@@ -447,7 +447,7 @@ test("actual POST routes high, medium, low and unknown confidence before grammar
   process.env.OCR_PROVIDER = "vision";
   for (const [confidence, status, grammarRuns] of [
     [0.95, 200, true], [0.90, 200, true], [0.899, 200, true],
-    [0.75, 200, true], [0.60, 200, true], [0.599, 200, false],
+    [0.75, 200, true], [0.74, 200, false], [0.60, 200, false], [0.599, 200, false],
     [0.40, 200, false], [null, 200, false], [undefined, 200, false],
   ]) {
     // Undefined must reach the provider JSON as a missing score.

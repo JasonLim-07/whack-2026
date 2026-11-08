@@ -23,7 +23,7 @@ by reported punctuation can be separated without inventing boxes. Other results
 without sufficient boxes require explicit target-text confirmation. This is grid-guided recognition, not a general
 freeform document segmentation system.
 
-The application review cutoff is now **below 0.60**, rather than below 0.90.
+The application review cutoff is **below 0.75**, adjusted from 0.60 after user testing.
 `web/lib/ai/recognitionPolicy.mjs` centralises this adjustable policy. Scores are
 provider reports, not accuracy probabilities; original values remain unchanged.
 Unknown character scores and fallback-model transcriptions still require
@@ -157,7 +157,7 @@ model accuracy; record real-provider and browser checks separately.
 - 235 automated tests passed, covering the new coordinator, HTTP endpoints,
   feedback components and existing recognition/grammar/whiteboard behaviour.
 - ESLint and the production build passed.
-- The gentler-policy regression checks cover the 0.60 boundary, moderate scores,
+- The review-policy regression checks cover the 0.75 boundary, moderate scores,
   unknown scores, unchanged provider values, and non-blocking template differences.
 - Full-stop regression checks cover dots/circles in adjacent and shared squares,
   OCR omission, context without boxes, uncertainty confirmation, rejected commas
