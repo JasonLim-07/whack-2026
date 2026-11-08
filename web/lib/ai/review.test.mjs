@@ -4,7 +4,8 @@ import test, { beforeEach } from "node:test";
 import { POST, runtime } from "../../app/api/review/route.js";
 import { handleReview, reviewHandwriting } from "./review.js";
 import { normaliseReviewOcrResult, recogniseHandwriting } from "./reviewOcr.js";
-import { normalizeOcrResult } from "./ocr.js";
+import { normalizeOcrResult } from "./transcribe.js";
+import { buildThreeTierOcrResponse } from "./ocr.js";
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
@@ -23,6 +24,8 @@ beforeEach((t) => {
     GOOGLE_CLOUD_VISION_API_KEY: "unit-test-key",
     GOOGLE_VISION_API_KEY: "unit-test-key",
     GOOGLE_API_KEY: "unit-test-key",
+    OCR_API_KEY: "unit-test-key",
+    VISION_API_KEY: "unit-test-key",
   };
   t.after(() => { process.env = previousEnvironment; });
   t.mock.method(globalThis, "fetch", async () => {
@@ -286,10 +289,11 @@ test("adapter preserves original text and genuine Cloud Vision segment scores", 
     characters: Array.from("我有三书.", (character) => ({ character, confidence: 0.94 })),
   });
   assert.equal(result.text, "我有三书。");
-  assert.deepEqual(normaliseReviewOcrResult(result), {
-    text: "我有三书.", confidence: null,
-    segments: Array.from("我有三书.", (text) => ({ text, confidence: 0.94 })),
-  });
+  const adapted = normaliseReviewOcrResult(buildThreeTierOcrResponse(result));
+  assert.equal(adapted.text, "我有三书.");
+  assert.equal(adapted.status, "SUCCESS");
+  assert.equal(adapted.confidence, null);
+  assert.deepEqual(adapted.segments, Array.from("我有三书.", (text) => ({ text, confidence: 0.94 })));
 });
 
 test("adapter discards Gemini self-rated confidence but preserves recognized characters", () => {
@@ -297,25 +301,30 @@ test("adapter discards Gemini self-rated confidence but preserves recognized cha
     provider: "gemini-vision", transcription: "我你爱。", overallConfidence: 0.99,
     characters: Array.from("我你爱。", (character) => ({ character, confidence: 0.99 })),
   });
-  assert.deepEqual(normaliseReviewOcrResult(result), {
-    text: "我你爱。", confidence: null,
-    segments: Array.from("我你爱。", (text) => ({ text, confidence: null })),
-  });
+  const adapted = normaliseReviewOcrResult(buildThreeTierOcrResponse(result));
+  assert.equal(adapted.text, "我你爱。");
+  assert.equal(adapted.confidence, null);
+  assert.equal(adapted.requiresVerification, true);
+  assert.deepEqual(adapted.segments, Array.from("我你爱。", (text) => ({ text, confidence: null })));
 });
 
 test("adapter handles missing confidence and malformed OCR results", () => {
   const result = normalizeOcrResult({
     provider: "google-cloud-vision", characters: [{ character: "我" }],
   });
-  assert.deepEqual(normaliseReviewOcrResult(result), {
-    text: "我", confidence: null, segments: [{ text: "我", confidence: null }],
-  });
+  const adapted = normaliseReviewOcrResult(buildThreeTierOcrResponse(result));
+  assert.equal(adapted.text, "我");
+  assert.equal(adapted.confidence, null);
+  assert.equal(adapted.requiresVerification, true);
+  assert.deepEqual(adapted.segments, [{ text: "我", confidence: null }]);
   for (const invalid of [null, {}, { success: false }, { success: true, originalText: "我" }]) {
     assert.throws(() => normaliseReviewOcrResult(invalid), /invalid transcription result/);
   }
 });
 
-function mockRealProviders(t, { blank = false, fail = false } = {}) {
+function mockRealProviders(t, options = {}) {
+  const { blank = false, fail = false } = options;
+  const confidence = Object.hasOwn(options, "confidence") ? options.confidence : 0.91;
   const calls = [];
   t.mock.method(globalThis, "fetch", async (url, init) => {
     const body = JSON.parse(init.body);
@@ -330,7 +339,7 @@ function mockRealProviders(t, { blank = false, fail = false } = {}) {
       if (vision) {
         return Response.json({ responses: [{ fullTextAnnotation: {
           text, pages: [{ blocks: [{ paragraphs: [{ words: [{
-            symbols: Array.from(text, (text) => ({ text, confidence: 0.91 })),
+            symbols: Array.from(text, (text) => ({ text, confidence })),
           }] }] }] }],
         } }] });
       }
@@ -377,7 +386,7 @@ test("wired OCR adapter passes into standalone orchestration without paid reques
 
 test("wired route rejects unreadable OCR and preserves rate-limit handling", async (t) => {
   let calls = mockRealProviders(t, { blank: true });
-  await expectError(await POST(request()), 400, "UNREADABLE_TEXT");
+  await expectError(await POST(request()), 422, "UNREADABLE_HANDWRITING");
   assert.deepEqual(calls, ["ocr"]);
   calls = mockRealProviders(t, { fail: true });
   await expectError(await POST(request()), 429, "RATE_LIMITED");
@@ -385,10 +394,87 @@ test("wired route rejects unreadable OCR and preserves rate-limit handling", asy
 });
 
 test("wired route sanitizes missing OCR credentials without making a request", async (t) => {
-  for (const key of ["GEMINI_API_KEY", "GEMINI_OCR_API_KEY", "GOOGLE_CLOUD_VISION_API_KEY", "GOOGLE_VISION_API_KEY", "GOOGLE_API_KEY"]) {
+  for (const key of ["OCR_API_KEY", "VISION_API_KEY", "GEMINI_API_KEY", "GEMINI_OCR_API_KEY", "GOOGLE_CLOUD_VISION_API_KEY", "GOOGLE_VISION_API_KEY", "GOOGLE_API_KEY"]) {
     delete process.env[key];
   }
   const network = t.mock.method(globalThis, "fetch", async () => { throw new Error("Must not be called"); });
   await expectError(await POST(request()), 502, "OCR_FAILED");
   assert.equal(network.mock.callCount(), 0);
+});
+
+test("actual POST routes high, medium, low and unknown confidence before grammar", async (t) => {
+  // Select the real Cloud Vision code path; only its transport is mocked.
+  process.env.OCR_PROVIDER = "vision";
+  for (const [confidence, status, grammarRuns] of [
+    [0.95, 200, true], [0.90, 200, true], [0.899, 200, false],
+    [0.75, 200, false], [0.60, 200, false], [0.599, 422, false],
+    [0.40, 422, false], [null, 200, false], [undefined, 200, false],
+  ]) {
+    // Undefined must reach the provider JSON as a missing score.
+    const calls = mockRealProviders(t, { confidence });
+    const response = await POST(request());
+    assert.equal(response.status, status, `confidence ${confidence}`);
+    const body = await response.json();
+    assert.deepEqual(calls, grammarRuns ? ["ocr", "grammar"] : ["ocr"]);
+    if (status === 422) {
+      assert.equal(body.error.code, "UNREADABLE_HANDWRITING");
+    } else if (!grammarRuns) {
+      assert.equal(body.requiresVerification, true);
+      assert.equal(body.recognizedText, "我有两个书.");
+      assert.ok(body.characterCandidates.length > 0);
+      for (const candidate of body.characterCandidates) {
+        assert.ok(candidate.options.length >= 2 && candidate.options.length <= 3);
+        assert.ok(candidate.options.some(({ char }) => char === candidate.originalAttempt));
+      }
+      assert.equal(body.correctedText, undefined);
+      assert.equal(body.issues, undefined);
+    }
+  }
+});
+
+test("JSON confirmation invokes the real grammar module and bypasses OCR", async (t) => {
+  let grammarCalls = 0;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.ok(!String(url).includes("vision.googleapis.com"));
+    const body = JSON.parse(init.body);
+    assert.deepEqual(JSON.parse(body.contents[0].parts[0].text), { text: "我有三书", level: "beginner" });
+    grammarCalls++;
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({
+      correctedText: "我有三本书", issues: [{ ...issue, original: "三书", replacement: "三本书" }],
+    }) }] }, finishReason: "STOP" }] });
+  });
+  const response = await POST(new Request("http://localhost/api/review", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "我有三书", revision: 4 }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(grammarCalls, 1);
+  assert.deepEqual(await response.json(), {
+    recognizedText: "我有三书", ocrConfidence: null, ocrSegments: [],
+    correctedText: "我有三本书", issues: [{ ...issue, original: "三书", replacement: "三本书" }], revision: 4,
+  });
+});
+
+test("JSON confirmation validates text, learner level, revision and request size", async () => {
+  for (const [input, code] of [
+    [null, "INVALID_TEXT"], [[], "INVALID_TEXT"], [{}, "INVALID_TEXT"],
+    [{ text: " " }, "INVALID_TEXT"], [{ text: 1 }, "INVALID_TEXT"],
+    [{ text: "我", level: null }, "INVALID_LEVEL"],
+    [{ text: "我", revision: -1 }, "INVALID_REVISION"],
+    [{ text: "我", revision: "1" }, "INVALID_REVISION"],
+    [{ text: "我", revision: 0.5 }, "INVALID_REVISION"],
+  ]) {
+    const response = await POST(new Request("http://localhost/api/review", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
+    }));
+    await expectError(response, 400, code);
+  }
+  for (const [body, status, code] of [
+    ["{", 400, "INVALID_REQUEST"],
+    [JSON.stringify({ text: "a".repeat(65536) }), 413, "TEXT_TOO_LARGE"],
+  ]) {
+    await expectError(await POST(new Request("http://localhost/api/review", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    })), status, code);
+  }
 });

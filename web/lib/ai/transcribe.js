@@ -94,11 +94,12 @@ function getCacheKey(base64, language, provider, model, uncertaintyThreshold) {
  * Parses a confidence score in [0, 1] without fabricating values when missing.
  * Returns null if the provider did not supply a numeric confidence score.
  */
-export function parseConfidence(value) {
+export function parseConfidence(value, round = true) {
   if (typeof value !== "number" || Number.isNaN(value) || !Number.isFinite(value)) {
     return null;
   }
-  return Math.round(Math.min(1, Math.max(0, value)) * 100) / 100;
+  const bounded = Math.min(1, Math.max(0, value));
+  return round ? Math.round(bounded * 100) / 100 : bounded;
 }
 
 /**
@@ -334,7 +335,7 @@ export async function callCloudVisionOcr({
             if (!ch) continue;
             characters.push({
               character: ch,
-              confidence: parseConfidence(symbol.confidence),
+              confidence: parseConfidence(symbol.confidence, false),
               bounds: verticesToBounds(symbol.boundingBox?.vertices),
             });
           }
