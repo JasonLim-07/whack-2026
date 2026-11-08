@@ -1,10 +1,10 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
-import { createReviewRunner, requestReview, validateReview } from "./client.mjs";
+import { createReviewRunner, getConfirmedText, requestConfirmedReview, requestReview, validateReview } from "./client.mjs";
 
 const review = (revision = 3) => ({
-  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], revision,
-  issues: [{ id: "one", type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
+  recognizedText: "我有两个书。", correctedText: "我有两本书。", ocrConfidence: null, ocrSegments: [], ocrCharacters: [], revision,
+  issues: [{ id: "one", start: 3, end: 4, type: "word_choice", original: "个", replacement: "本", explanation: "Use 本 for books." }],
 });
 const image = new Blob(["test-png"], { type: "image/png" });
 const deferred = () => {
@@ -55,12 +55,143 @@ test("malformed success, mismatched revisions, bad confidence and duplicate issu
 });
 
 test("HTTP, invalid JSON and network errors have useful retry messages", async () => {
-  for (const status of [400, 413, 429, 500, 502]) {
+  for (const status of [400, 413, 422, 429, 500, 502, 503]) {
     await assert.rejects(requestReview(image, 3, undefined,
       async () => Response.json({ error: { code: "TEST", message: "Please try again later." } }, { status })), /Please try again later/);
   }
   await assert.rejects(requestReview(image, 3, undefined, async () => new Response("broken")), /unexpected response/);
   await assert.rejects(requestReview(image, 3, undefined, async () => { throw new TypeError("fetch failed"); }), /Check your connection/);
+});
+
+const verification = () => ({
+  status: "LOW_CONFIDENCE", recognizedText: "我有三书。", ocrConfidence: null, ocrSegments: [],
+  requiresVerification: true, revision: 3,
+  characterCandidates: [{ position: 3, originalAttempt: "书", confidence: null,
+    options: [{ char: "本", reason: "Context suggestion" }, { char: "书", reason: "Original" }, { char: "韦", reason: "Suggestion" }] }],
+});
+
+test("verification and missing confidence never require premature grammar output", () => {
+  const value = verification();
+  assert.equal(validateReview(value, 3), value);
+  delete value.ocrConfidence;
+  delete value.characterCandidates[0].confidence;
+  assert.equal(validateReview(value, 3), value);
+  assert.throws(() => getConfirmedText(value, {}), /Choose an option/);
+  assert.equal(getConfirmedText(value, { 3: "书" }), "我有三书。");
+  assert.equal(getConfirmedText(value, { 3: "本" }), "我有三本。");
+});
+
+test("candidate validation rejects unsafe positions, duplicate positions and malformed alternatives", () => {
+  for (const position of [-1, 99, 1.5, "3"]) {
+    const value = verification();
+    value.characterCandidates[0].position = position;
+    assert.throws(() => validateReview(value, 3), /unexpected response/);
+  }
+  for (const change of [
+    (value) => value.characterCandidates.push(value.characterCandidates[0]),
+    (value) => { value.characterCandidates[0].originalAttempt = "木"; },
+    (value) => { value.characterCandidates[0].options[0].char = "本书"; },
+    (value) => { value.characterCandidates[0].options[0].char = "书"; },
+    (value) => { value.characterCandidates[0].options = [{ char: "本", reason: "Suggestion" }]; },
+    (value) => { value.requiresVerification = false; },
+    (value) => { value.revision = 2; },
+  ]) {
+    const value = verification();
+    change(value);
+    assert.throws(() => validateReview(value, 3), /unexpected response/);
+  }
+  assert.throws(() => getConfirmedText(verification(), { 3: "木" }), /Choose an option/);
+});
+
+test("confirmation uses Unicode code-point positions and preserves every other character", () => {
+  const value = verification();
+  value.recognizedText = "𠮷 我有三书。\n";
+  value.characterCandidates[0].position = 5;
+  assert.equal(getConfirmedText(value, { 5: "本", 0: "田" }), "𠮷 我有三本。\n");
+  assert.equal(getConfirmedText(value, { 5: "书" }), value.recognizedText);
+});
+
+test("confirmed request sends JSON with revision and learner level, not an image", async () => {
+  const signal = new AbortController().signal;
+  const result = await requestConfirmedReview("我有三书。", 3, signal, async (url, options) => {
+    assert.equal(url, "/api/review");
+    assert.equal(options.headers["Content-Type"], "application/json");
+    assert.deepEqual(JSON.parse(options.body), { text: "我有三书。", level: "beginner", revision: 3 });
+    assert.equal(options.signal, signal);
+    return Response.json(review());
+  });
+  assert.deepEqual(result, review());
+  await assert.rejects(requestConfirmedReview(" ", 3), /must not be empty/);
+  await assert.rejects(requestConfirmedReview("我", 3, undefined, async () => Response.json(review(2))), /unexpected response/);
+});
+
+test("confirmation runner shares the duplicate guard and discards results after drawing edits", async () => {
+  let current = true;
+  let exports = 0;
+  const response = deferred();
+  const runner = createReviewRunner(undefined, () => response.promise);
+  const { options, events } = callbacks({ text: "我有三书。", exportImage: async () => { exports++; return image; }, isCurrent: () => current });
+  const task = runner.run(options);
+  assert.equal(await runner.run(options), false);
+  current = false; // covers drawing, undo or clear changing the revision
+  response.resolve(review());
+  await task;
+  assert.equal(exports, 0);
+  assert.deepEqual(events, ["start", "finish"]);
+});
+
+test("cancelled confirmation cannot overwrite a subsequent review even if abort is ignored", async () => {
+  const late = deferred();
+  let signal;
+  const runner = createReviewRunner(async () => review(), (_, __, suppliedSignal) => { signal = suppliedSignal; return late.promise; });
+  const old = callbacks({ text: "我有三书。" });
+  const task = runner.run(old.options);
+  runner.cancel();
+  assert.equal(signal.aborted, true);
+  const next = callbacks();
+  await runner.run(next.options);
+  late.resolve(review());
+  await task;
+  assert.deepEqual(old.events, ["start"]);
+  assert.deepEqual(next.events, ["start", review(), "finish"]);
+});
+
+test("failed confirmation can retry the same selected text without OCR or PNG export", async () => {
+  let attempts = 0;
+  const runner = createReviewRunner(async () => { throw new Error("OCR must not run"); }, async (text) => {
+    assert.equal(text, "我有三书。");
+    if (++attempts === 1) throw new Error("Grammar temporarily unavailable");
+    return review();
+  });
+  const { options, events } = callbacks({ text: "我有三书。", exportImage: async () => { throw new Error("Must not export"); } });
+  await runner.run(options);
+  await runner.run(options);
+  assert.deepEqual(events, ["start", "Grammar temporarily unavailable", "finish", "start", review(), "finish"]);
+});
+
+test("frontend verification to JSON confirmation runs grammar only after explicit selection", async () => {
+  const { handleReview } = await import("../ai/review.js");
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aVXcAAAAASUVORK5CYII=", "base64");
+  const stages = [];
+  const send = async (_, options) => handleReview(new Request("http://localhost/api/review", options), {
+    recogniseHandwriting: async () => {
+      stages.push("ocr");
+      return { text: "我有三书。", confidence: null, segments: [], status: "LOW_CONFIDENCE",
+        requiresVerification: true, characterCandidates: verification().characterCandidates };
+    },
+    analyseGrammar: async (text) => {
+      stages.push("grammar");
+      assert.equal(text, "我有三书。");
+      return { correctedText: "我有三本书。", issues: [{ id: "one", type: "grammar", start: 2, end: 4, original: "三书", replacement: "三本书", explanation: "Use 本 for books." }] };
+    },
+  });
+  const pending = await requestReview(new Blob([png], { type: "image/png" }), 3, undefined, send);
+  assert.equal(pending.requiresVerification, true);
+  assert.deepEqual(stages, ["ocr"]);
+  assert.throws(() => getConfirmedText(pending, {}), /Choose an option/);
+  const result = await requestConfirmedReview(getConfirmedText(pending, { 3: "书" }), 3, undefined, send);
+  assert.deepEqual(stages, ["ocr", "grammar"]);
+  assert.equal(result.correctedText, "我有三本书。");
 });
 
 test("runner guards against duplicates during export and network; unlocks after success", async () => {
@@ -136,4 +267,24 @@ test("frontend multipart request passes through the real backend handler and gra
     }));
   assert.deepEqual(stages, ["ocr", "grammar"]);
   assert.deepEqual(result, review());
+});
+
+test("snapshot metadata is delivered with its result; edits during export cancel old callbacks", async () => {
+  const firstExport = deferred();
+  let submissions = 0;
+  const runner = createReviewRunner(async () => { submissions++; return review(); });
+  const first = callbacks({ exportSnapshot: () => firstExport.promise });
+  const task = runner.run(first.options);
+  runner.cancel(); // Called immediately at ink-edit start, before revision commits.
+  const bounds = { left: -70, top: -90, width: 200, height: 100 };
+  let captured;
+  const next = callbacks({ exportSnapshot: async () => ({ image, revision: 3, bounds }), onSuccess: (value, snapshot) => { captured = { value, snapshot }; } });
+  await runner.run(next.options);
+  firstExport.resolve({ image, revision: 3, bounds });
+  await task;
+  assert.equal(submissions, 1);
+  assert.equal(captured.snapshot.bounds, bounds);
+  assert.deepEqual(captured.value, review());
+  assert.deepEqual(first.events, ["start"]);
+  assert.deepEqual(next.events, ["start", "finish"]);
 });

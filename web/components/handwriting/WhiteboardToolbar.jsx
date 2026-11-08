@@ -1,6 +1,6 @@
 ﻿const buttonClass = "rounded-md border border-neutral-200 px-3 py-2 text-sm transition-colors hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-600 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent";
 
-export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom, onUndo, onClear }) {
+export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom, onReturnToWriting, onUndo, onClear }) {
   const percentage = ui.zoom === 1 ? "100%" : `${(ui.zoom * 100).toFixed(1)}%`;
   return (
     <div role="group" aria-label="Whiteboard controls" className="flex flex-wrap items-center gap-2">
@@ -27,7 +27,7 @@ export default function WhiteboardToolbar({ disabled = false, ui, onTool, onZoom
           <input aria-label="Zoom" type="range" min="0.25" max="1" step="0.001" value={ui.zoom} onChange={(event) => onZoom(Number(event.target.value))} className="w-24 accent-neutral-800 sm:w-32" />
           <output className="w-14 text-right tabular-nums" aria-live="off">{percentage}</output>
         </label>
-        <button type="button" className={buttonClass} onClick={() => onZoom(1)} title="Return to writing scale">100%</button>
+        <button type="button" className={buttonClass} onClick={onReturnToWriting} title="Return to your latest writing at 100%">100%</button>
       </div>
     </div>
   );

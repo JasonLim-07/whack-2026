@@ -30,7 +30,7 @@ function correction() {
     correctedText: "我有两本书。",
     issues: [
       {
-        id: "issue-1",
+        id: "issue-1", start: 3, end: 4,
         type: "word_choice",
         original: "个",
         replacement: "本",
@@ -66,6 +66,7 @@ test("all three issue types and insertion/deletion strings are supported", () =>
     response.issues[0].replacement = "";
     assert.deepEqual(validateGrammarResponse(response, originalText), response);
     response.issues[0].original = "";
+    response.issues[0].end = response.issues[0].start;
     response.issues[0].replacement = "本";
     assert.deepEqual(validateGrammarResponse(response, originalText), response);
   }
@@ -175,7 +176,7 @@ test("Gemini request uses configured model, learner level and the complete respo
   assert.equal(body.generationConfig.responseMimeType, "application/json");
   const schema = body.generationConfig.responseJsonSchema;
   assert.deepEqual(schema.required, ["correctedText", "issues"]);
-  assert.deepEqual(schema.properties.issues.items.required, ["id", "type", "original", "replacement", "explanation"]);
+  assert.deepEqual(schema.properties.issues.items.required, ["id", "type", "original", "replacement", "explanation", "start", "end"]);
   assert.deepEqual(schema.properties.issues.items.properties.type.enum, ["grammar", "word_choice", "character"]);
 });
 
@@ -261,4 +262,15 @@ test("importing the live script makes no request and prints nothing", async (t) 
   assert.equal(request.mock.callCount(), 0);
   assert.equal(log.mock.callCount(), 0);
   assert.equal(error.mock.callCount(), 0);
+});
+
+test("grammar ranges validate repeated text, supplementary characters and insertion positions", () => {
+  const text = "\u{20000}\u4e2a\u4e2a";
+  const issue = { ...correction().issues[0], start: 2, end: 3 };
+  assert.equal(validateGrammarResponse({ correctedText: text, issues: [issue] }, text).issues[0].start, 2);
+  const insertion = { ...issue, original: "", start: 3, end: 3 };
+  assert.equal(validateGrammarResponse({ correctedText: text, issues: [insertion] }, text).issues[0].end, 3);
+  for (const range of [{ start: 0, end: 1 }, { start: -1, end: 0 }, { start: 1, end: 4 }, { start: 1.5, end: 2 }, { start: 2, end: 1 }]) {
+    assert.throws(() => validateGrammarResponse({ correctedText: text, issues: [{ ...issue, ...range }] }, text), /range must match/);
+  }
 });
