@@ -112,8 +112,6 @@ test("one compact personalisation tip appears only with completed grammar feedba
   assert.match(html, /Use 本 for books/);
   assert.doesNotMatch(render({ review: pending, personalisedTip: tip }), /Measure words have come up again/);
   assert.doesNotMatch(render({ review, stale: true, personalisedTip: tip }), /Measure words have come up again/);
-<<<<<<< HEAD
-=======
 });
 
 test("correct reviews have a single positive message without a repeated corrected sentence", () => {
@@ -158,5 +156,14 @@ test("empty, loading and retry states remain concise and accessible", () => {
   assert.match(render({ review: null, loading: true }), /Analysing your writing/);
   const failed = render({ review: null, error: "Please try again." });
   assert.match(failed, /role="alert"/); assert.match(failed, /Try again/);
->>>>>>> feature/sidebar-cleanup
+});
+
+test("verification-only keeps prefixed confirmation controls without duplicating sidebar sections", () => {
+  const html = render({ review: pending, verificationOnly: true, controlIdPrefix: "region-test-",
+    selections: { 3: "书" }, personalisedTip: "Only after grammar." });
+  assert.match(html, /id="region-test-character-choice-3"/);
+  assert.match(html, /name="region-test-character-3"/);
+  assert.match(html, /checked=""/);
+  assert.match(html, /Confirm text and review/);
+  assert.doesNotMatch(html, /Your writing|Your learning tip|Review details|Only after grammar/);
 });
